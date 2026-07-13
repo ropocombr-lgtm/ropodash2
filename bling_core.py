@@ -31,7 +31,7 @@ NOMES_SITUACAO_CONHECIDAS = {
 # Mapeamento manual: a API não expõe nome de canal sem o escopo
 # "Canais de venda", que este app não tem (exigiria reautorizar).
 NOMES_CANAL_CONHECIDOS = {
-    "205971033": "Loja própria",
+    "205971033": "Amazon",
     "205939074": "Shopee",
     "205971561": "Mercado Livre",
 }

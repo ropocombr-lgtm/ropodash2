@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 from datetime import date, datetime, time, timedelta
 from html import escape
 from zoneinfo import ZoneInfo
@@ -12,15 +13,10 @@ from bling_core import (
     calcular_historico_diario,
     carregar_dataframe,
     gerar_url_autorizacao,
-    ler_historico_diario,
-    ler_itens_pedidos,
-    ler_metas,
     ler_tokens,
     moeda_br,
-    montar_comparativo,
     nome_canal,
     salvar_historico_diario,
-    sincronizar_itens_pedidos,
 )
 
 FUSO_SAO_PAULO = ZoneInfo("America/Sao_Paulo")
@@ -196,27 +192,64 @@ def injetar_css_tv() -> None:
             background: linear-gradient(90deg, var(--tv-blue), var(--tv-good));
         }
 
+        .tv-chart-card .tv-card-value {
+            font-size: clamp(2.6rem, 5.4vw, 7.4rem);
+            margin-bottom: 10px;
+        }
+
+        .tv-chart-wrap {
+            margin-top: 26px;
+            width: 100%;
+        }
+
+        .tv-chart-wrap svg {
+            display: block;
+            width: 100%;
+            height: min(34vh, 310px);
+        }
+
+        .tv-chart-axis {
+            stroke: rgba(226, 232, 240, 0.28);
+            stroke-width: 2;
+        }
+
+        .tv-chart-grid {
+            stroke: rgba(226, 232, 240, 0.11);
+            stroke-width: 1;
+        }
+
+        .tv-chart-line {
+            fill: none;
+            stroke: var(--tv-blue);
+            stroke-width: 7;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .tv-chart-dot {
+            fill: var(--tv-good);
+            stroke: #0f1f34;
+            stroke-width: 4;
+        }
+
+        .tv-chart-labels {
+            display: flex;
+            justify-content: space-between;
+            color: var(--tv-muted);
+            font-size: clamp(0.9rem, 1.1vw, 1.2rem);
+            margin-top: 8px;
+        }
+
         .tv-slide {
             position: absolute;
             inset: 0;
             opacity: 0;
             transform: translateX(6%);
-            animation: tv-slide-cycle var(--tv-cycle) infinite ease-in-out;
-            animation-delay: var(--tv-delay);
         }
 
         .tv-slide:first-child:last-child {
             opacity: 1;
             transform: none;
-            animation: none;
-        }
-
-        @keyframes tv-slide-cycle {
-            0% { opacity: 0; transform: translateX(6%) scale(0.985); }
-            4% { opacity: 1; transform: translateX(0) scale(1); }
-            16% { opacity: 1; transform: translateX(0) scale(1); }
-            20% { opacity: 0; transform: translateX(-6%) scale(0.985); }
-            100% { opacity: 0; transform: translateX(-6%) scale(0.985); }
         }
 
         @media (max-width: 1100px) {
@@ -262,6 +295,8 @@ def card_tv(
     chip: str = "",
     chip_tipo: str = "neutral",
     progresso: float | None = None,
+    extra_html: str = "",
+    classe_extra: str = "",
 ) -> str:
     progresso_html = ""
 
@@ -280,11 +315,12 @@ def card_tv(
     )
 
     return (
-        '<div class="tv-card">'
+        f'<div class="tv-card {escape(classe_extra)}">'
         f'<div class="tv-card-label">{escape(titulo)}</div>'
         f'<div class="tv-card-value">{escape(valor)}</div>'
         f'<div class="tv-card-detail">{escape(detalhe)}</div>'
         f"{progresso_html}"
+        f"{extra_html}"
         f"{chip_html}"
         "</div>"
     )
@@ -301,6 +337,135 @@ def resumo_dia(df_validos: pd.DataFrame, hoje: date) -> tuple[float, int]:
     return (
         float(pedidos_hoje["total"].sum()),
         int(pedidos_hoje["id"].nunique()),
+    )
+
+
+def segundos_passados_no_dia(agora: datetime) -> float:
+    inicio_dia = datetime.combine(
+        agora.date(),
+        time.min,
+        tzinfo=agora.tzinfo,
+    )
+
+    return max((agora - inicio_dia).total_seconds(), 0)
+
+
+def agregar_faturamento_diario(df_validos: pd.DataFrame) -> pd.DataFrame:
+    if df_validos.empty:
+        return pd.DataFrame(columns=["dia", "faturamento", "pedidos"])
+
+    return (
+        df_validos.dropna(subset=["data"])
+        .assign(dia=lambda dados: dados["data"].dt.date)
+        .groupby("dia", as_index=False)
+        .agg(faturamento=("total", "sum"), pedidos=("id", "nunique"))
+        .sort_values("dia")
+    )
+
+
+def faturamento_periodo(
+    faturamento_diario: pd.DataFrame,
+    inicio: date,
+    fim: date,
+) -> float:
+    if faturamento_diario.empty:
+        return 0.0
+
+    filtro = (
+        (faturamento_diario["dia"] >= inicio)
+        & (faturamento_diario["dia"] <= fim)
+    )
+
+    return float(faturamento_diario.loc[filtro, "faturamento"].sum())
+
+
+def card_evolucao(
+    faturamento_diario: pd.DataFrame,
+    hoje: date,
+    faturamento_hoje: float,
+) -> str:
+    ultimos_dias = faturamento_diario.tail(14).copy()
+
+    if ultimos_dias.empty:
+        return card_tv(
+            "Evolução do faturamento",
+            moeda_br(faturamento_hoje),
+            "Ainda sem histórico suficiente para desenhar o gráfico.",
+            chip="KPI de hoje",
+            chip_tipo="neutral",
+            classe_extra="tv-chart-card",
+        )
+
+    valores = ultimos_dias["faturamento"].astype(float).tolist()
+    maior = max(max(valores), 1.0)
+    largura = 1000
+    altura = 300
+    margem_x = 28
+    margem_y = 28
+    area_w = largura - margem_x * 2
+    area_h = altura - margem_y * 2
+
+    pontos = []
+    total_pontos = max(len(valores) - 1, 1)
+
+    for indice, valor in enumerate(valores):
+        x = margem_x + (indice / total_pontos) * area_w
+        y = margem_y + (1 - (valor / maior)) * area_h
+        pontos.append((x, y))
+
+    polilinha = " ".join(f"{x:.1f},{y:.1f}" for x, y in pontos)
+    dots = "".join(
+        f'<circle class="tv-chart-dot" cx="{x:.1f}" cy="{y:.1f}" r="8" />'
+        for x, y in pontos
+    )
+
+    inicio = ultimos_dias.iloc[0]["dia"]
+    fim = ultimos_dias.iloc[-1]["dia"]
+    media_7 = float(ultimos_dias["faturamento"].tail(7).mean())
+    comparacao = (
+        faturamento_hoje / media_7 - 1
+        if media_7
+        else None
+    )
+    status, status_tipo = status_por_razao(
+        faturamento_hoje / media_7 if media_7 else None
+    )
+
+    grafico = f"""
+    <div class="tv-chart-wrap">
+        <svg viewBox="0 0 {largura} {altura}" role="img" aria-label="Evolução do faturamento">
+            <line class="tv-chart-grid" x1="{margem_x}" y1="{margem_y}" x2="{largura - margem_x}" y2="{margem_y}" />
+            <line class="tv-chart-grid" x1="{margem_x}" y1="{altura / 2}" x2="{largura - margem_x}" y2="{altura / 2}" />
+            <line class="tv-chart-axis" x1="{margem_x}" y1="{altura - margem_y}" x2="{largura - margem_x}" y2="{altura - margem_y}" />
+            <polyline class="tv-chart-line" points="{polilinha}" />
+            {dots}
+        </svg>
+        <div class="tv-chart-labels">
+            <span>{inicio.strftime('%d/%m')}</span>
+            <span>Media 7 dias: {moeda_br(media_7)}</span>
+            <span>{fim.strftime('%d/%m')}</span>
+        </div>
+    </div>
+    """
+
+    detalhe = (
+        f"{status} vs. media 7 dias"
+        if comparacao is not None
+        else "KPI de hoje"
+    )
+
+    return card_tv(
+        "Evolução do faturamento",
+        moeda_br(faturamento_hoje),
+        detalhe,
+        chip=(
+            f"{comparacao:+.0%} vs. media 7 dias"
+            if comparacao is not None
+            else "KPI de hoje"
+        ),
+        chip_tipo=status_tipo,
+        extra_html=grafico,
+        classe_extra="tv-chart-card",
     )
 
 
@@ -436,7 +601,8 @@ def renderizar_tv() -> None:
 
     agora = datetime.now(FUSO_SAO_PAULO)
     hoje = agora.date()
-    inicio_busca = hoje - timedelta(days=13)
+    inicio_mes = hoje.replace(day=1)
+    inicio_busca = min(hoje - timedelta(days=13), inicio_mes)
 
     if not ler_tokens():
         st.warning("O dashboard ainda não está conectado ao Bling.")
@@ -459,57 +625,40 @@ def renderizar_tv() -> None:
     cancelados = df["situacao_id"].isin(SITUACOES_CANCELADAS)
     df_validos = df.loc[~cancelados].copy()
     faturamento_hoje, pedidos_hoje = resumo_dia(df_validos, hoje)
+    faturamento_diario = agregar_faturamento_diario(df_validos)
 
-    pedidos_hoje_df = df.loc[df["data"].dt.date == hoje]
-    sincronizar_itens_pedidos(pedidos_hoje_df, pausa_segundos=0.6)
-
-    itens_hoje = ler_itens_pedidos(hoje, hoje)
-    unidades_hoje = 0.0
-    produto_lider = "Sem itens sincronizados"
-
-    if not itens_hoje.empty:
-        itens_validos_hoje = itens_hoje.loc[
-            ~itens_hoje["situacao_id"].isin(SITUACOES_CANCELADAS)
-        ].copy()
-
-        if not itens_validos_hoje.empty:
-            unidades_hoje = float(itens_validos_hoje["quantidade"].sum())
-            ranking_produtos = (
-                itens_validos_hoje.groupby("descricao", as_index=False)
-                .agg(quantidade=("quantidade", "sum"))
-                .sort_values("quantidade", ascending=False)
-            )
-            produto_lider = str(ranking_produtos.iloc[0]["descricao"])
-
-    historico = ler_historico_diario(inicio_busca)
-    comparativo = montar_comparativo(ler_metas(), historico, hoje)
-
-    cards_metas, meta_diaria_total, meta_semanal_total, realizado_semana, _ = (
-        calcular_cards_metas(comparativo, historico, hoje)
+    percentual_dia = min(
+        max(segundos_passados_no_dia(agora) / (24 * 60 * 60), 0),
+        1,
+    )
+    previsao_dia = (
+        faturamento_hoje / percentual_dia
+        if percentual_dia > 0
+        else faturamento_hoje
     )
 
-    segundos_dia = 24 * 60 * 60
-    segundos_passados = (
-        datetime.combine(hoje, agora.time())
-        - datetime.combine(hoje, time.min)
-    ).total_seconds()
-    percentual_dia = min(max(segundos_passados / segundos_dia, 0), 1)
-    esperado_agora = meta_diaria_total * percentual_dia
-    pacing_dia = faturamento_hoje / esperado_agora if esperado_agora else None
-    status_pacing, tipo_pacing = status_por_razao(pacing_dia)
-
-    faturamento_14_dias = (
-        df_validos.dropna(subset=["data"])
-        .assign(dia=lambda dados: dados["data"].dt.date)
-        .groupby("dia", as_index=False)
-        .agg(faturamento=("total", "sum"), pedidos=("id", "nunique"))
-        .sort_values("dia")
+    inicio_semana = hoje - timedelta(days=hoje.weekday())
+    fim_semana = inicio_semana + timedelta(days=6)
+    realizado_semana = faturamento_periodo(
+        faturamento_diario,
+        inicio_semana,
+        hoje,
+    )
+    dias_semana_corridos = (hoje - inicio_semana).days + 1
+    previsao_semana = (
+        realizado_semana / dias_semana_corridos * 7
+        if dias_semana_corridos
+        else realizado_semana
     )
 
-    media_7 = (
-        float(faturamento_14_dias["faturamento"].tail(7).mean())
-        if not faturamento_14_dias.empty
-        else 0.0
+    dias_no_mes = calendar.monthrange(hoje.year, hoje.month)[1]
+    fim_mes = hoje.replace(day=dias_no_mes)
+    realizado_mes = faturamento_periodo(faturamento_diario, inicio_mes, hoje)
+    dias_mes_corridos = hoje.day
+    previsao_mes = (
+        realizado_mes / dias_mes_corridos * dias_no_mes
+        if dias_mes_corridos
+        else realizado_mes
     )
 
     receita_por_canal = (
@@ -520,127 +669,124 @@ def renderizar_tv() -> None:
         .sort_values("faturamento", ascending=False)
     )
 
-    cards_extras = [
+    cards_lojas = [
         card_tv(
-            "Pacing do dia",
-            status_pacing,
-            (
-                f"Esperado até agora: {moeda_br(esperado_agora)} · "
-                f"realizado: {moeda_br(faturamento_hoje)}"
-            ),
-            chip=f"{pct_texto(pacing_dia)} do ritmo esperado",
-            chip_tipo=tipo_pacing,
-            progresso=pacing_dia,
-        ),
-        card_tv(
-            "Meta diária total",
-            moeda_br(meta_diaria_total),
-            "Soma das metas ativas para hoje",
-            chip=f"{pct_texto(faturamento_hoje / meta_diaria_total if meta_diaria_total else None)} atingido",
-            chip_tipo=status_por_razao(
-                faturamento_hoje / meta_diaria_total if meta_diaria_total else None
-            )[1],
-            progresso=faturamento_hoje / meta_diaria_total
-            if meta_diaria_total
-            else None,
-        ),
-        card_tv(
-            "Meta semanal total",
-            moeda_br(meta_semanal_total),
-            f"Realizado na semana: {moeda_br(realizado_semana)}",
-            chip=f"{pct_texto(realizado_semana / meta_semanal_total if meta_semanal_total else None)} atingido",
-            chip_tipo=status_por_razao(
-                realizado_semana / meta_semanal_total
-                if meta_semanal_total
-                else None
-            )[1],
-            progresso=realizado_semana / meta_semanal_total
-            if meta_semanal_total
-            else None,
-        ),
-        card_tv(
-            "Média diária 7 dias",
-            moeda_br(media_7),
-            "Base de ritmo recente",
-            chip="Histórico recente",
+            str(canal["canal"]),
+            moeda_br(float(canal["faturamento"])),
+            f"{int(canal['pedidos'])} venda(s) hoje",
+            chip="Faturamento por loja",
             chip_tipo="neutral",
-        ),
+        )
+        for _, canal in receita_por_canal.iterrows()
     ]
 
-    for _, canal in receita_por_canal.iterrows():
-        cards_extras.append(
-            card_tv(
-                f"Canal · {canal['canal']}",
-                moeda_br(float(canal["faturamento"])),
-                f"{int(canal['pedidos'])} pedido(s) hoje",
-                chip="Hoje",
-                chip_tipo="neutral",
-            )
-        )
-
-    cards_principais = [
+    cards_previsao = [
         card_tv(
-            "Faturamento hoje",
-            moeda_br(faturamento_hoje),
-            "Pedidos válidos do dia",
-            chip=f"{pedidos_hoje} pedido(s)",
-            chip_tipo="neutral",
-        ),
-        card_tv(
-            "Pedidos hoje",
-            f"{pedidos_hoje:,}".replace(",", "."),
-            "Pedidos não cancelados",
-            chip="Tempo real",
+            "Previsão diária",
+            moeda_br(previsao_dia),
+            (
+                f"Hoje realizado: {moeda_br(faturamento_hoje)} · "
+                f"{pct_texto(percentual_dia)} do dia"
+            ),
+            chip="Fechamento estimado do dia",
             chip_tipo="good",
         ),
         card_tv(
-            "Unidades hoje",
-            f"{unidades_hoje:,.0f}".replace(",", "."),
-            f"Produto líder: {produto_lider}",
-            chip="Itens",
+            "Previsão semanal",
+            moeda_br(previsao_semana),
+            (
+                f"Realizado {inicio_semana.strftime('%d/%m')} a "
+                f"{hoje.strftime('%d/%m')}: {moeda_br(realizado_semana)}"
+            ),
+            chip=f"Semana ate {fim_semana.strftime('%d/%m')}",
             chip_tipo="neutral",
         ),
         card_tv(
-            "Pacing",
-            status_pacing,
-            f"{pct_texto(percentual_dia)} do dia transcorrido",
-            chip=f"{pct_texto(pacing_dia)} do esperado",
-            chip_tipo=tipo_pacing,
-            progresso=pacing_dia,
+            "Previsão mensal",
+            moeda_br(previsao_mes),
+            (
+                f"Realizado {inicio_mes.strftime('%d/%m')} a "
+                f"{hoje.strftime('%d/%m')}: {moeda_br(realizado_mes)}"
+            ),
+            chip=f"Mes ate {fim_mes.strftime('%d/%m')}",
+            chip_tipo="neutral",
         ),
     ]
 
-    todos_cards = cards_principais + cards_metas + cards_extras
+    todos_cards = cards_lojas + cards_previsao + [
+        card_evolucao(faturamento_diario, hoje, faturamento_hoje)
+    ]
 
     if not todos_cards:
         todos_cards = [
             card_tv(
-                "Sem metas ativas",
+                "Sem vendas por loja hoje",
                 moeda_br(faturamento_hoje),
-                "Cadastre uma meta para acompanhar pacing diário e semanal.",
+                "Nenhum pedido válido encontrado no dia.",
             )
         ]
 
     duracao_total = max(len(todos_cards) * SEGUNDOS_POR_CARD, 1)
-    slides = "".join(
-        (
-            '<div class="tv-slide" '
-            f'style="--tv-cycle: {duracao_total}s; '
-            f'--tv-delay: {indice * SEGUNDOS_POR_CARD}s;">'
-            f"{card}</div>"
-        )
-        for indice, card in enumerate(todos_cards)
-    )
+    slides_partes = []
+    animacoes_partes = []
+
+    if len(todos_cards) == 1:
+        slides = f'<div class="tv-slide">{todos_cards[0]}</div>'
+        animacoes = ""
+    else:
+        transicao_pct = min(1.8 / duracao_total * 100, 4)
+
+        for indice, card in enumerate(todos_cards):
+            inicio_pct = indice * SEGUNDOS_POR_CARD / duracao_total * 100
+            fim_pct = (indice + 1) * SEGUNDOS_POR_CARD / duracao_total * 100
+            entra_pct = min(inicio_pct + transicao_pct, fim_pct)
+            sai_pct = max(fim_pct - transicao_pct, entra_pct)
+            nome_animacao = f"tv-slide-{indice}"
+
+            if indice == 0:
+                animacoes_partes.append(
+                    f"""
+                    @keyframes {nome_animacao} {{
+                        0% {{ opacity: 1; transform: translateX(0) scale(1); }}
+                        {sai_pct:.3f}% {{ opacity: 1; transform: translateX(0) scale(1); }}
+                        {fim_pct:.3f}% {{ opacity: 0; transform: translateX(-6%) scale(0.985); }}
+                        100% {{ opacity: 0; transform: translateX(-6%) scale(0.985); }}
+                    }}
+                    """
+                )
+            else:
+                animacoes_partes.append(
+                    f"""
+                    @keyframes {nome_animacao} {{
+                        0% {{ opacity: 0; transform: translateX(6%) scale(0.985); }}
+                        {inicio_pct:.3f}% {{ opacity: 0; transform: translateX(6%) scale(0.985); }}
+                        {entra_pct:.3f}% {{ opacity: 1; transform: translateX(0) scale(1); }}
+                        {sai_pct:.3f}% {{ opacity: 1; transform: translateX(0) scale(1); }}
+                        {fim_pct:.3f}% {{ opacity: 0; transform: translateX(-6%) scale(0.985); }}
+                        100% {{ opacity: 0; transform: translateX(-6%) scale(0.985); }}
+                    }}
+                    """
+                )
+            slides_partes.append(
+                (
+                    '<div class="tv-slide" '
+                    f'style="animation: {nome_animacao} {duracao_total}s '
+                    f'infinite ease-in-out;">{card}</div>'
+                )
+            )
+
+        slides = "".join(slides_partes)
+        animacoes = f"<style>{''.join(animacoes_partes)}</style>"
 
     st.html(
         f"""
+        {animacoes}
         <div class="tv-shell">
             <div class="tv-topbar">
                 <div>
                     <h1 class="tv-title">Televisão ROPO</h1>
                     <div class="tv-subtitle">
-                        Resultados de hoje, meta diária, meta semanal e pacing
-                        em tela cheia.
+                        Vendas e faturamento de hoje por loja.
                     </div>
                 </div>
                 <div class="tv-clock">
@@ -658,10 +804,7 @@ def renderizar_tv() -> None:
         """
     )
 
-    st.caption(
-        "Pacing do dia compara faturamento de hoje com a meta diária "
-        "proporcional ao horário atual."
-    )
+    st.caption("Cada card mostra o faturamento e o número de vendas de hoje por loja.")
 
 
 @st.fragment(run_every="2m")
