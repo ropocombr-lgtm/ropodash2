@@ -423,6 +423,104 @@ def moeda_br(valor: float) -> str:
 
 
 # =========================================================
+# METAS DE VENDAS
+# =========================================================
+
+def inicio_semana(data: date) -> date:
+    return data - timedelta(days=data.weekday())
+
+
+def inicio_mes(data: date) -> date:
+    return data.replace(day=1)
+
+
+def ler_metas() -> pd.DataFrame:
+    resposta = supabase.table("metas").select("*").execute()
+    dados = resposta.data or []
+
+    colunas = ["canal", "periodicidade", "referencia", "valor"]
+
+    if not dados:
+        return pd.DataFrame(columns=colunas)
+
+    metas = pd.DataFrame(dados)
+    metas["referencia"] = pd.to_datetime(metas["referencia"]).dt.date
+
+    return metas[colunas]
+
+
+def salvar_meta(
+    canal: str,
+    periodicidade: str,
+    referencia: date,
+    valor: float,
+) -> None:
+    registro = {
+        "canal": canal,
+        "periodicidade": periodicidade,
+        "referencia": referencia.isoformat(),
+        "valor": valor,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    (
+        supabase.table("metas")
+        .upsert(registro, on_conflict="canal,periodicidade,referencia")
+        .execute()
+    )
+
+
+def calcular_realizado_por_periodo(
+    df_validos: pd.DataFrame,
+    periodicidade: str,
+) -> pd.DataFrame:
+    dados = df_validos.dropna(subset=["data"]).copy()
+    dados["canal"] = dados["loja_id"].fillna("Sem canal").astype(str)
+
+    calcular_referencia = (
+        inicio_semana if periodicidade == "semanal" else inicio_mes
+    )
+
+    dados["referencia"] = dados["data"].dt.date.apply(calcular_referencia)
+
+    return (
+        dados.groupby(["canal", "referencia"], as_index=False)
+        .agg(realizado=("total", "sum"))
+    )
+
+
+def montar_comparativo(
+    realizado: pd.DataFrame,
+    metas: pd.DataFrame,
+    periodicidade: str,
+) -> pd.DataFrame:
+    metas_filtradas = metas.loc[metas["periodicidade"] == periodicidade]
+
+    comparativo = realizado.merge(
+        metas_filtradas[["canal", "referencia", "valor"]],
+        on=["canal", "referencia"],
+        how="left",
+    ).rename(columns={"valor": "meta"})
+
+    tem_meta = comparativo["meta"].notna()
+
+    comparativo["gap"] = (
+        comparativo["realizado"] - comparativo["meta"]
+    ).where(tem_meta)
+
+    comparativo["atingido"] = (
+        comparativo["realizado"] / comparativo["meta"]
+    ).where(tem_meta)
+
+    comparativo["meta"] = comparativo["meta"].fillna(0)
+
+    return comparativo.sort_values(
+        ["referencia", "canal"],
+        ascending=[False, True],
+    )
+
+
+# =========================================================
 # INTERFACE
 # =========================================================
 
@@ -652,6 +750,124 @@ def exibir_dashboard() -> None:
         "Última atualização exibida: "
         f"{datetime.now().strftime('%d/%m/%Y às %H:%M:%S')}"
     )
+
+    st.divider()
+    st.subheader("🎯 Metas por canal")
+    st.caption(
+        "O canal é identificado pelo ID da loja no Bling "
+        "(a resolução do nome da loja ainda não foi implementada)."
+    )
+
+    metas_df = ler_metas()
+
+    aba_semanal, aba_mensal = st.tabs(["Semanal", "Mensal"])
+
+    for aba, periodicidade in (
+        (aba_semanal, "semanal"),
+        (aba_mensal, "mensal"),
+    ):
+        with aba:
+            realizado = calcular_realizado_por_periodo(
+                df_validos,
+                periodicidade,
+            )
+
+            comparativo = montar_comparativo(
+                realizado,
+                metas_df,
+                periodicidade,
+            )
+
+            if comparativo.empty:
+                st.info("Nenhum dado de venda no período para comparar.")
+                continue
+
+            tabela_comparativo = comparativo.copy()
+
+            tabela_comparativo["referencia"] = tabela_comparativo[
+                "referencia"
+            ].apply(lambda valor: valor.strftime("%d/%m/%Y"))
+
+            for coluna in ("realizado", "meta"):
+                tabela_comparativo[coluna] = tabela_comparativo[
+                    coluna
+                ].apply(moeda_br)
+
+            tabela_comparativo["gap"] = tabela_comparativo["gap"].apply(
+                lambda valor: moeda_br(valor) if pd.notna(valor) else "Sem meta"
+            )
+
+            tabela_comparativo["atingido"] = tabela_comparativo[
+                "atingido"
+            ].apply(
+                lambda valor: (
+                    f"{valor:.0%}" if pd.notna(valor) else "Sem meta"
+                )
+            )
+
+            st.dataframe(
+                tabela_comparativo.rename(
+                    columns={
+                        "canal": "Canal",
+                        "referencia": "Início do período",
+                        "realizado": "Realizado",
+                        "meta": "Meta",
+                        "gap": "Gap",
+                        "atingido": "Atingido",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with st.expander("Cadastrar ou atualizar meta"):
+        with st.form("form_meta"):
+            canais_disponiveis = sorted(
+                df_validos["loja_id"].dropna().astype(str).unique()
+            )
+
+            canal_meta = st.selectbox(
+                "Canal (ID da loja)",
+                options=canais_disponiveis or ["Sem canal"],
+            )
+
+            periodicidade_meta = st.radio(
+                "Periodicidade",
+                options=["semanal", "mensal"],
+                horizontal=True,
+            )
+
+            referencia_meta = st.date_input(
+                "Uma data dentro do período "
+                "(semana: qualquer dia dela; mês: qualquer dia dele)",
+                value=date.today(),
+                key="referencia_meta",
+            )
+
+            valor_meta = st.number_input(
+                "Valor da meta (R$)",
+                min_value=0.0,
+                step=100.0,
+            )
+
+            enviar_meta = st.form_submit_button("Salvar meta")
+
+            if enviar_meta:
+                referencia_normalizada = (
+                    inicio_semana(referencia_meta)
+                    if periodicidade_meta == "semanal"
+                    else inicio_mes(referencia_meta)
+                )
+
+                salvar_meta(
+                    canal_meta,
+                    periodicidade_meta,
+                    referencia_normalizada,
+                    valor_meta,
+                )
+
+                st.success("Meta salva com sucesso.")
+                st.rerun()
 
 
 exibir_dashboard()
