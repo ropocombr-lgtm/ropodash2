@@ -5,7 +5,13 @@ from datetime import date, datetime, timedelta
 import plotly.express as px
 import streamlit as st
 
-from bling_core import carregar_dataframe, gerar_url_autorizacao, ler_tokens, moeda_br
+from bling_core import (
+    SITUACOES_CANCELADAS,
+    carregar_dataframe,
+    gerar_url_autorizacao,
+    ler_tokens,
+    moeda_br,
+)
 
 st.set_page_config(
     page_title="Tempo Real - Dashboard Bling",
@@ -45,8 +51,7 @@ def exibir_tempo_real() -> None:
         st.info("Nenhum pedido encontrado nos últimos dias.")
         return
 
-    situacao_normalizada = df["situacao"].fillna("").astype(str).str.lower()
-    cancelados = situacao_normalizada.str.contains("cancel", regex=False)
+    cancelados = df["situacao_id"].isin(SITUACOES_CANCELADAS)
     df_validos = df.loc[~cancelados].copy()
 
     faturamento_diario = (

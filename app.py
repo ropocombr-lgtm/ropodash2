@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
@@ -7,6 +8,7 @@ import plotly.express as px
 import streamlit as st
 
 from bling_core import (
+    SITUACOES_CANCELADAS,
     carregar_dataframe,
     gerar_url_autorizacao,
     ler_tokens,
@@ -127,6 +129,26 @@ def montar_comparativo(
 
 
 # =========================================================
+# ANÁLISE COMERCIAL
+# =========================================================
+
+def faturamento_valido(df: pd.DataFrame) -> float:
+    if df.empty:
+        return 0.0
+
+    cancelados = df["situacao_id"].isin(SITUACOES_CANCELADAS)
+
+    return float(df.loc[~cancelados, "total"].sum())
+
+
+def variacao_percentual(atual: float, anterior: float) -> float | None:
+    if not anterior:
+        return None
+
+    return (atual - anterior) / anterior
+
+
+# =========================================================
 # INTERFACE
 # =========================================================
 
@@ -199,17 +221,7 @@ def exibir_dashboard() -> None:
         st.info("Nenhum pedido foi encontrado no período selecionado.")
         return
 
-    situacao_normalizada = (
-        df["situacao"]
-        .fillna("")
-        .astype(str)
-        .str.lower()
-    )
-
-    cancelados = situacao_normalizada.str.contains(
-        "cancel",
-        regex=False,
-    )
+    cancelados = df["situacao_id"].isin(SITUACOES_CANCELADAS)
 
     df_validos = df.loc[~cancelados].copy()
 
@@ -224,258 +236,467 @@ def exibir_dashboard() -> None:
 
     quantidade_cancelados = int(df.loc[cancelados, "id"].nunique())
 
-    coluna_1, coluna_2, coluna_3, coluna_4 = st.columns(4)
-
-    coluna_1.metric(
-        "Faturamento",
-        moeda_br(faturamento),
+    aba_comercial, aba_produto, aba_preditivo, aba_metas = st.tabs(
+        ["📈 Comercial", "🛒 Produto", "🔮 Preditivo", "🎯 Metas"]
     )
 
-    coluna_2.metric(
-        "Pedidos",
-        f"{quantidade_pedidos:,}".replace(",", "."),
-    )
+    with aba_comercial:
+        coluna_1, coluna_2, coluna_3, coluna_4 = st.columns(4)
 
-    coluna_3.metric(
-        "Ticket médio",
-        moeda_br(ticket_medio),
-    )
-
-    coluna_4.metric(
-        "Cancelados",
-        f"{quantidade_cancelados:,}".replace(",", "."),
-    )
-
-    st.divider()
-
-    vendas_diarias = (
-        df_validos.dropna(subset=["data"])
-        .assign(dia=lambda dados: dados["data"].dt.date)
-        .groupby("dia", as_index=False)
-        .agg(
-            faturamento=("total", "sum"),
-            pedidos=("id", "nunique"),
-        )
-    )
-
-    grafico_faturamento = px.line(
-        vendas_diarias,
-        x="dia",
-        y="faturamento",
-        markers=True,
-        title="Evolução do faturamento",
-        labels={
-            "dia": "Data",
-            "faturamento": "Faturamento",
-        },
-    )
-
-    st.plotly_chart(
-        grafico_faturamento,
-        use_container_width=True,
-    )
-
-    coluna_status, coluna_clientes = st.columns(2)
-
-    with coluna_status:
-        por_situacao = (
-            df.groupby("situacao", as_index=False)
-            .agg(pedidos=("id", "nunique"))
-            .sort_values("pedidos", ascending=False)
+        coluna_1.metric(
+            "Faturamento",
+            moeda_br(faturamento),
         )
 
-        grafico_status = px.bar(
-            por_situacao,
-            x="situacao",
-            y="pedidos",
-            title="Pedidos por situação",
-            labels={
-                "situacao": "Situação",
-                "pedidos": "Pedidos",
-            },
+        coluna_2.metric(
+            "Pedidos",
+            f"{quantidade_pedidos:,}".replace(",", "."),
         )
 
-        st.plotly_chart(
-            grafico_status,
-            use_container_width=True,
+        coluna_3.metric(
+            "Ticket médio",
+            moeda_br(ticket_medio),
         )
 
-    with coluna_clientes:
-        principais_clientes = (
-            df_validos.groupby("cliente", as_index=False)
+        coluna_4.metric(
+            "Cancelados",
+            f"{quantidade_cancelados:,}".replace(",", "."),
+        )
+
+        st.caption(
+            "Comparações com o período anterior e com o ano anterior"
+        )
+
+        duracao_periodo = (data_final - data_inicial).days + 1
+
+        periodo_anterior_final = data_inicial - timedelta(days=1)
+        periodo_anterior_inicial = periodo_anterior_final - timedelta(
+            days=duracao_periodo - 1
+        )
+
+        # Aproximação simples de "mesmo período do ano anterior";
+        # não ajusta para o dia da semana nem para anos bissextos.
+        ano_anterior_inicial = data_inicial - timedelta(days=365)
+        ano_anterior_final = data_final - timedelta(days=365)
+
+        df_periodo_anterior = carregar_dataframe(
+            periodo_anterior_inicial.isoformat(),
+            periodo_anterior_final.isoformat(),
+        )
+
+        df_ano_anterior = carregar_dataframe(
+            ano_anterior_inicial.isoformat(),
+            ano_anterior_final.isoformat(),
+        )
+
+        crescimento_periodo = variacao_percentual(
+            faturamento,
+            faturamento_valido(df_periodo_anterior),
+        )
+
+        crescimento_ano = variacao_percentual(
+            faturamento,
+            faturamento_valido(df_ano_anterior),
+        )
+
+        coluna_5, coluna_6 = st.columns(2)
+
+        coluna_5.metric(
+            "Vs. período anterior",
+            (
+                f"{crescimento_periodo:+.1%}"
+                if crescimento_periodo is not None
+                else "Sem base de comparação"
+            ),
+        )
+
+        coluna_6.metric(
+            "Vs. mesmo período ano anterior",
+            (
+                f"{crescimento_ano:+.1%}"
+                if crescimento_ano is not None
+                else "Sem base de comparação"
+            ),
+        )
+
+        st.divider()
+
+        vendas_diarias = (
+            df_validos.dropna(subset=["data"])
+            .assign(dia=lambda dados: dados["data"].dt.date)
+            .groupby("dia", as_index=False)
             .agg(
                 faturamento=("total", "sum"),
                 pedidos=("id", "nunique"),
             )
-            .sort_values("faturamento", ascending=False)
-            .head(10)
         )
 
-        grafico_clientes = px.bar(
-            principais_clientes,
-            x="faturamento",
-            y="cliente",
-            orientation="h",
-            title="Principais clientes",
+        grafico_faturamento = px.line(
+            vendas_diarias,
+            x="dia",
+            y="faturamento",
+            markers=True,
+            title="Evolução do faturamento",
             labels={
-                "cliente": "Cliente",
+                "dia": "Data",
                 "faturamento": "Faturamento",
             },
         )
 
         st.plotly_chart(
-            grafico_clientes,
+            grafico_faturamento,
             use_container_width=True,
         )
 
-    st.subheader("Pedidos do período")
-
-    tabela = df.sort_values(
-        "data",
-        ascending=False,
-    ).copy()
-
-    tabela["data"] = tabela["data"].dt.strftime("%d/%m/%Y")
-    tabela["total"] = tabela["total"].apply(moeda_br)
-
-    st.dataframe(
-        tabela[
-            [
-                "numero",
-                "data",
-                "cliente",
-                "situacao",
-                "total",
+        if not vendas_diarias.empty:
+            melhor_dia = vendas_diarias.loc[
+                vendas_diarias["faturamento"].idxmax()
             ]
-        ],
-        use_container_width=True,
-        hide_index=True,
-    )
+            pior_dia = vendas_diarias.loc[
+                vendas_diarias["faturamento"].idxmin()
+            ]
+            media_diaria = faturamento / vendas_diarias["dia"].nunique()
 
-    st.caption(
-        "Última atualização exibida: "
-        f"{datetime.now().strftime('%d/%m/%Y às %H:%M:%S')}"
-    )
+            coluna_7, coluna_8, coluna_9 = st.columns(3)
 
-    st.divider()
-    st.subheader("🎯 Metas por canal")
-    st.caption(
-        "O canal é identificado pelo ID da loja no Bling "
-        "(a resolução do nome da loja ainda não foi implementada)."
-    )
-
-    metas_df = ler_metas()
-
-    aba_semanal, aba_mensal = st.tabs(["Semanal", "Mensal"])
-
-    for aba, periodicidade in (
-        (aba_semanal, "semanal"),
-        (aba_mensal, "mensal"),
-    ):
-        with aba:
-            realizado = calcular_realizado_por_periodo(
-                df_validos,
-                periodicidade,
+            coluna_7.metric(
+                f"Melhor dia ({melhor_dia['dia'].strftime('%d/%m')})",
+                moeda_br(melhor_dia["faturamento"]),
             )
 
-            comparativo = montar_comparativo(
-                realizado,
-                metas_df,
-                periodicidade,
+            coluna_8.metric(
+                f"Pior dia ({pior_dia['dia'].strftime('%d/%m')})",
+                moeda_br(pior_dia["faturamento"]),
             )
 
-            if comparativo.empty:
-                st.info("Nenhum dado de venda no período para comparar.")
-                continue
-
-            tabela_comparativo = comparativo.copy()
-
-            tabela_comparativo["referencia"] = tabela_comparativo[
-                "referencia"
-            ].apply(lambda valor: valor.strftime("%d/%m/%Y"))
-
-            for coluna in ("realizado", "meta"):
-                tabela_comparativo[coluna] = tabela_comparativo[
-                    coluna
-                ].apply(moeda_br)
-
-            tabela_comparativo["gap"] = tabela_comparativo["gap"].apply(
-                lambda valor: (
-                    moeda_br(valor) if pd.notna(valor) else "Sem meta"
-                )
+            coluna_9.metric(
+                "Média diária",
+                moeda_br(media_diaria),
             )
 
-            tabela_comparativo["atingido"] = tabela_comparativo[
-                "atingido"
-            ].apply(
-                lambda valor: (
-                    f"{valor:.0%}" if pd.notna(valor) else "Sem meta"
-                )
+        st.divider()
+
+        inicio_mes_atual = hoje.replace(day=1)
+
+        df_mes_atual = carregar_dataframe(
+            inicio_mes_atual.isoformat(),
+            hoje.isoformat(),
+        )
+
+        faturamento_mes_atual = faturamento_valido(df_mes_atual)
+        dias_transcorridos = (hoje - inicio_mes_atual).days + 1
+        dias_no_mes = calendar.monthrange(hoje.year, hoje.month)[1]
+
+        projecao_mes = (
+            faturamento_mes_atual / dias_transcorridos * dias_no_mes
+            if dias_transcorridos
+            else 0
+        )
+
+        coluna_10, coluna_11 = st.columns(2)
+
+        coluna_10.metric(
+            "Acumulado do mês",
+            moeda_br(faturamento_mes_atual),
+        )
+
+        coluna_11.metric(
+            "Projeção de fechamento do mês",
+            moeda_br(projecao_mes),
+        )
+
+        st.caption(
+            "Projeção simples (acumulado ÷ dias transcorridos × dias do "
+            "mês). Não considera sazonalidade nem campanhas."
+        )
+
+        st.divider()
+
+        coluna_status, coluna_clientes = st.columns(2)
+
+        with coluna_status:
+            por_situacao = (
+                df.groupby("situacao", as_index=False)
+                .agg(pedidos=("id", "nunique"))
+                .sort_values("pedidos", ascending=False)
             )
 
-            st.dataframe(
-                tabela_comparativo.rename(
-                    columns={
-                        "canal": "Canal",
-                        "referencia": "Início do período",
-                        "realizado": "Realizado",
-                        "meta": "Meta",
-                        "gap": "Gap",
-                        "atingido": "Atingido",
-                    }
-                ),
+            grafico_status = px.bar(
+                por_situacao,
+                x="situacao",
+                y="pedidos",
+                title="Pedidos por situação",
+                labels={
+                    "situacao": "Situação",
+                    "pedidos": "Pedidos",
+                },
+            )
+
+            st.plotly_chart(
+                grafico_status,
                 use_container_width=True,
-                hide_index=True,
             )
 
-    with st.expander("Cadastrar ou atualizar meta"):
-        with st.form("form_meta"):
-            canais_disponiveis = sorted(
-                df_validos["loja_id"].dropna().astype(str).unique()
+        with coluna_clientes:
+            principais_clientes = (
+                df_validos.groupby("cliente", as_index=False)
+                .agg(
+                    faturamento=("total", "sum"),
+                    pedidos=("id", "nunique"),
+                )
+                .sort_values("faturamento", ascending=False)
+                .head(10)
             )
 
-            canal_meta = st.selectbox(
-                "Canal (ID da loja)",
-                options=canais_disponiveis or ["Sem canal"],
+            grafico_clientes = px.bar(
+                principais_clientes,
+                x="faturamento",
+                y="cliente",
+                orientation="h",
+                title="Principais clientes",
+                labels={
+                    "cliente": "Cliente",
+                    "faturamento": "Faturamento",
+                },
             )
 
-            periodicidade_meta = st.radio(
-                "Periodicidade",
-                options=["semanal", "mensal"],
-                horizontal=True,
+            st.plotly_chart(
+                grafico_clientes,
+                use_container_width=True,
             )
 
-            referencia_meta = st.date_input(
-                "Uma data dentro do período "
-                "(semana: qualquer dia dela; mês: qualquer dia dele)",
-                value=date.today(),
-                key="referencia_meta",
+        coluna_canal, coluna_cancelamento_canal = st.columns(2)
+
+        with coluna_canal:
+            receita_por_canal = (
+                df_validos.assign(
+                    canal=lambda d: d["loja_id"].fillna(
+                        "Sem canal"
+                    ).astype(str)
+                )
+                .groupby("canal", as_index=False)
+                .agg(faturamento=("total", "sum"))
+                .sort_values("faturamento", ascending=False)
             )
 
-            valor_meta = st.number_input(
-                "Valor da meta (R$)",
-                min_value=0.0,
-                step=100.0,
+            grafico_canal = px.bar(
+                receita_por_canal,
+                x="canal",
+                y="faturamento",
+                title="Receita por canal (ID da loja)",
+                labels={
+                    "canal": "Canal",
+                    "faturamento": "Faturamento",
+                },
             )
 
-            enviar_meta = st.form_submit_button("Salvar meta")
+            st.plotly_chart(
+                grafico_canal,
+                use_container_width=True,
+            )
 
-            if enviar_meta:
-                referencia_normalizada = (
-                    inicio_semana(referencia_meta)
-                    if periodicidade_meta == "semanal"
-                    else inicio_mes(referencia_meta)
+        with coluna_cancelamento_canal:
+            cancelamento_por_canal = (
+                df.assign(
+                    canal=lambda d: d["loja_id"].fillna(
+                        "Sem canal"
+                    ).astype(str),
+                    cancelado=cancelados,
+                )
+                .groupby("canal", as_index=False)
+                .agg(
+                    total_pedidos=("id", "nunique"),
+                    cancelados=("cancelado", "sum"),
+                )
+            )
+
+            cancelamento_por_canal["taxa_cancelamento"] = (
+                cancelamento_por_canal["cancelados"]
+                / cancelamento_por_canal["total_pedidos"]
+            )
+
+            grafico_cancelamento = px.bar(
+                cancelamento_por_canal,
+                x="canal",
+                y="taxa_cancelamento",
+                title="Taxa de cancelamento por canal",
+                labels={
+                    "canal": "Canal",
+                    "taxa_cancelamento": "Taxa de cancelamento",
+                },
+            )
+
+            grafico_cancelamento.update_yaxes(tickformat=".0%")
+
+            st.plotly_chart(
+                grafico_cancelamento,
+                use_container_width=True,
+            )
+
+        st.subheader("Pedidos do período")
+
+        tabela = df.sort_values(
+            "data",
+            ascending=False,
+        ).copy()
+
+        tabela["data"] = tabela["data"].dt.strftime("%d/%m/%Y")
+        tabela["total"] = tabela["total"].apply(moeda_br)
+
+        st.dataframe(
+            tabela[
+                [
+                    "numero",
+                    "data",
+                    "cliente",
+                    "situacao",
+                    "total",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.caption(
+            "Última atualização exibida: "
+            f"{datetime.now().strftime('%d/%m/%Y às %H:%M:%S')}"
+        )
+
+    with aba_produto:
+        st.info(
+            "Em construção. O Bling só devolve SKU, quantidade e valor "
+            "dos itens no endpoint de detalhe do pedido (1 chamada de "
+            "API por pedido, não por página). Antes de implementar o "
+            "ranking de produtos, curva ABC e cesta de compra, vamos "
+            "combinar um período padrão (ex.: últimos 90 dias) para não "
+            "estourar o limite diário de requisições do Bling."
+        )
+
+    with aba_preditivo:
+        st.info(
+            "Em construção. As projeções semanal, mensal e anual serão "
+            "calculadas a partir do histórico diário já usado na aba "
+            "Comercial — sem custo extra de API. Chegam na próxima "
+            "atualização."
+        )
+
+    with aba_metas:
+        metas_df = ler_metas()
+
+        aba_semanal, aba_mensal = st.tabs(["Semanal", "Mensal"])
+
+        for aba, periodicidade in (
+            (aba_semanal, "semanal"),
+            (aba_mensal, "mensal"),
+        ):
+            with aba:
+                realizado = calcular_realizado_por_periodo(
+                    df_validos,
+                    periodicidade,
                 )
 
-                salvar_meta(
-                    canal_meta,
-                    periodicidade_meta,
-                    referencia_normalizada,
-                    valor_meta,
+                comparativo = montar_comparativo(
+                    realizado,
+                    metas_df,
+                    periodicidade,
                 )
 
-                st.success("Meta salva com sucesso.")
-                st.rerun()
+                if comparativo.empty:
+                    st.info(
+                        "Nenhum dado de venda no período para comparar."
+                    )
+                    continue
+
+                tabela_comparativo = comparativo.copy()
+
+                tabela_comparativo["referencia"] = tabela_comparativo[
+                    "referencia"
+                ].apply(lambda valor: valor.strftime("%d/%m/%Y"))
+
+                for coluna in ("realizado", "meta"):
+                    tabela_comparativo[coluna] = tabela_comparativo[
+                        coluna
+                    ].apply(moeda_br)
+
+                tabela_comparativo["gap"] = tabela_comparativo[
+                    "gap"
+                ].apply(
+                    lambda valor: (
+                        moeda_br(valor) if pd.notna(valor) else "Sem meta"
+                    )
+                )
+
+                tabela_comparativo["atingido"] = tabela_comparativo[
+                    "atingido"
+                ].apply(
+                    lambda valor: (
+                        f"{valor:.0%}" if pd.notna(valor) else "Sem meta"
+                    )
+                )
+
+                st.dataframe(
+                    tabela_comparativo.rename(
+                        columns={
+                            "canal": "Canal",
+                            "referencia": "Início do período",
+                            "realizado": "Realizado",
+                            "meta": "Meta",
+                            "gap": "Gap",
+                            "atingido": "Atingido",
+                        }
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        with st.expander("Cadastrar ou atualizar meta"):
+            with st.form("form_meta"):
+                canais_disponiveis = sorted(
+                    df_validos["loja_id"].dropna().astype(str).unique()
+                )
+
+                canal_meta = st.selectbox(
+                    "Canal (ID da loja)",
+                    options=canais_disponiveis or ["Sem canal"],
+                )
+
+                periodicidade_meta = st.radio(
+                    "Periodicidade",
+                    options=["semanal", "mensal"],
+                    horizontal=True,
+                )
+
+                referencia_meta = st.date_input(
+                    "Uma data dentro do período "
+                    "(semana: qualquer dia dela; mês: qualquer dia dele)",
+                    value=date.today(),
+                    key="referencia_meta",
+                )
+
+                valor_meta = st.number_input(
+                    "Valor da meta (R$)",
+                    min_value=0.0,
+                    step=100.0,
+                )
+
+                enviar_meta = st.form_submit_button("Salvar meta")
+
+                if enviar_meta:
+                    referencia_normalizada = (
+                        inicio_semana(referencia_meta)
+                        if periodicidade_meta == "semanal"
+                        else inicio_mes(referencia_meta)
+                    )
+
+                    salvar_meta(
+                        canal_meta,
+                        periodicidade_meta,
+                        referencia_normalizada,
+                        valor_meta,
+                    )
+
+                    st.success("Meta salva com sucesso.")
+                    st.rerun()
 
 
 exibir_dashboard()

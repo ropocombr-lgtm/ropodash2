@@ -19,6 +19,25 @@ API_BASE_URL = "https://api.bling.com.br/Api/v3"
 
 TOKEN_ROW_ID = 1
 
+# IDs de situação confirmados manualmente no Bling do cliente (a API não
+# expõe o nome da situação sem o escopo "Situações", que este app não tem).
+SITUACOES_CANCELADAS = {12}
+
+NOMES_SITUACAO_CONHECIDAS = {
+    9: "Atendido",
+    12: "Cancelado",
+}
+
+
+def nome_situacao(situacao_id: int | None) -> str:
+    if situacao_id is None:
+        return "Não informada"
+
+    return NOMES_SITUACAO_CONHECIDAS.get(
+        situacao_id,
+        f"Situação {situacao_id}",
+    )
+
 
 # =========================================================
 # SEGREDOS
@@ -352,13 +371,16 @@ def transformar_pedidos(
         situacao = pedido.get("situacao") or {}
         loja = pedido.get("loja") or {}
 
+        situacao_id = situacao.get("id")
+
         registros.append(
             {
                 "id": pedido.get("id"),
                 "numero": pedido.get("numero"),
                 "data": pedido.get("data"),
                 "cliente": contato.get("nome", "Não informado"),
-                "situacao": situacao.get("valor", "Não informada"),
+                "situacao_id": situacao_id,
+                "situacao": nome_situacao(situacao_id),
                 "loja_id": loja.get("id"),
                 "total_produtos": pedido.get("totalProdutos", 0),
                 "total": pedido.get("total", 0),
