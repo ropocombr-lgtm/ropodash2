@@ -8,8 +8,10 @@ import plotly.express as px
 import streamlit as st
 
 from bling_core import (
+    GRUPOS_CANAL,
     SITUACOES_CANCELADAS,
     calcular_historico_diario,
+    canais_do_grupo,
     carregar_dataframe,
     carregar_historico_completo,
     gerar_url_autorizacao,
@@ -162,198 +164,193 @@ processar_callback_oauth()
 # METAS DE VENDAS
 # =========================================================
 
-def inicio_semana(data: date) -> date:
-    return data - timedelta(days=data.weekday())
-
-
-def inicio_mes(data: date) -> date:
-    return data.replace(day=1)
-
-
 def ler_metas() -> pd.DataFrame:
     resposta = supabase.table("metas").select("*").execute()
     dados = resposta.data or []
 
-    colunas = ["canal", "periodicidade", "referencia", "valor"]
+    colunas = [
+        "id",
+        "canal",
+        "referencia_inicio",
+        "referencia_fim",
+        "valor",
+        "rotulo",
+    ]
 
     if not dados:
         return pd.DataFrame(columns=colunas)
 
     metas = pd.DataFrame(dados)
-    metas["referencia"] = pd.to_datetime(metas["referencia"]).dt.date
+    metas["referencia_inicio"] = pd.to_datetime(
+        metas["referencia_inicio"]
+    ).dt.date
+    metas["referencia_fim"] = pd.to_datetime(metas["referencia_fim"]).dt.date
+    metas["rotulo"] = metas["rotulo"].fillna("")
 
     return metas[colunas]
 
 
 def salvar_meta(
     canal: str,
-    periodicidade: str,
-    referencia: date,
+    referencia_inicio: date,
+    referencia_fim: date,
     valor: float,
+    rotulo: str = "",
 ) -> None:
     registro = {
         "canal": canal,
-        "periodicidade": periodicidade,
-        "referencia": referencia.isoformat(),
+        "referencia_inicio": referencia_inicio.isoformat(),
+        "referencia_fim": referencia_fim.isoformat(),
         "valor": valor,
+        "rotulo": rotulo or None,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
     (
         supabase.table("metas")
-        .upsert(registro, on_conflict="canal,periodicidade,referencia")
+        .upsert(
+            registro,
+            on_conflict="canal,referencia_inicio,referencia_fim",
+        )
         .execute()
     )
 
 
-def calcular_realizado_por_periodo(
-    df_validos: pd.DataFrame,
-    periodicidade: str,
-) -> pd.DataFrame:
-    dados = df_validos.dropna(subset=["data"]).copy()
-    dados["canal"] = dados["loja_id"].fillna("Sem canal").astype(str)
+def excluir_meta(meta_id: int) -> None:
+    supabase.table("metas").delete().eq("id", meta_id).execute()
 
-    calcular_referencia = (
-        inicio_semana if periodicidade == "semanal" else inicio_mes
+
+def calcular_realizado_meta(
+    historico: pd.DataFrame,
+    canal: str,
+    referencia_inicio: date,
+    referencia_fim: date,
+) -> float:
+    if historico.empty:
+        return 0.0
+
+    lojas = canais_do_grupo(canal)
+
+    filtro = (
+        historico["canal"].isin(lojas)
+        & (historico["data"] >= referencia_inicio)
+        & (historico["data"] <= referencia_fim)
     )
 
-    dados["referencia"] = dados["data"].dt.date.apply(calcular_referencia)
-
-    return (
-        dados.groupby(["canal", "referencia"], as_index=False)
-        .agg(realizado=("total", "sum"))
-    )
+    return float(historico.loc[filtro, "faturamento_valido"].sum())
 
 
 def montar_comparativo(
-    realizado: pd.DataFrame,
     metas: pd.DataFrame,
-    periodicidade: str,
-) -> pd.DataFrame:
-    metas_filtradas = metas.loc[metas["periodicidade"] == periodicidade]
-
-    comparativo = realizado.merge(
-        metas_filtradas[["canal", "referencia", "valor"]],
-        on=["canal", "referencia"],
-        how="left",
-    ).rename(columns={"valor": "meta"})
-
-    tem_meta = comparativo["meta"].notna()
-
-    comparativo["gap"] = (
-        comparativo["realizado"] - comparativo["meta"]
-    ).where(tem_meta)
-
-    comparativo["atingido"] = (
-        comparativo["realizado"] / comparativo["meta"]
-    ).where(tem_meta)
-
-    comparativo["meta"] = comparativo["meta"].fillna(0)
-
-    return comparativo.sort_values(
-        ["referencia", "canal"],
-        ascending=[False, True],
-    )
-
-
-def fim_periodo(referencia: date, periodicidade: str) -> date:
-    if periodicidade == "semanal":
-        return referencia + timedelta(days=6)
-
-    dias_no_mes = calendar.monthrange(referencia.year, referencia.month)[1]
-    return referencia.replace(day=dias_no_mes)
-
-
-def enriquecer_comparativo_com_ritmo(
-    comparativo: pd.DataFrame,
-    periodicidade: str,
+    historico: pd.DataFrame,
     hoje: date,
 ) -> pd.DataFrame:
-    enriquecido = comparativo.copy()
-
-    enriquecido["fim_periodo"] = enriquecido["referencia"].apply(
-        lambda referencia: fim_periodo(referencia, periodicidade)
-    )
-
-    enriquecido["dias_totais"] = [
-        (fim - referencia).days + 1
-        for fim, referencia in zip(
-            enriquecido["fim_periodo"], enriquecido["referencia"]
-        )
+    colunas = [
+        "id",
+        "canal",
+        "rotulo",
+        "referencia_inicio",
+        "referencia_fim",
+        "realizado",
+        "meta",
+        "meta_diaria",
+        "gap",
+        "atingido",
+        "ritmo_necessario",
+        "projecao",
+        "classificacao",
     ]
 
-    enriquecido["periodo_em_andamento"] = enriquecido["fim_periodo"] >= hoje
+    if metas.empty:
+        return pd.DataFrame(columns=colunas)
 
-    def _dias_transcorridos(linha: pd.Series) -> int:
-        fim_considerado = min(hoje, linha["fim_periodo"])
+    linhas = []
 
-        if fim_considerado < linha["referencia"]:
-            return 0
+    for _, linha_meta in metas.iterrows():
+        referencia_inicio = linha_meta["referencia_inicio"]
+        referencia_fim = linha_meta["referencia_fim"]
+        valor_meta = float(linha_meta["valor"])
 
-        return (fim_considerado - linha["referencia"]).days + 1
+        realizado = calcular_realizado_meta(
+            historico,
+            linha_meta["canal"],
+            referencia_inicio,
+            referencia_fim,
+        )
 
-    enriquecido["dias_transcorridos"] = enriquecido.apply(
-        _dias_transcorridos, axis=1
+        dias_totais = (referencia_fim - referencia_inicio).days + 1
+        periodo_em_andamento = referencia_fim >= hoje
+
+        fim_considerado = min(hoje, referencia_fim)
+        dias_transcorridos = (
+            (fim_considerado - referencia_inicio).days + 1
+            if fim_considerado >= referencia_inicio
+            else 0
+        )
+
+        dias_restantes = max(dias_totais - dias_transcorridos, 0)
+
+        gap = realizado - valor_meta if valor_meta > 0 else None
+        atingido = realizado / valor_meta if valor_meta > 0 else None
+
+        meta_restante = max(valor_meta - realizado, 0)
+
+        ritmo_necessario = (
+            meta_restante / dias_restantes
+            if valor_meta > 0
+            and periodo_em_andamento
+            and dias_restantes > 0
+            else None
+        )
+
+        projecao = (
+            realizado / dias_transcorridos * dias_totais
+            if periodo_em_andamento and dias_transcorridos > 0
+            else None
+        )
+
+        if valor_meta <= 0:
+            classificacao = "Sem meta"
+        elif not periodo_em_andamento:
+            classificacao = "Período encerrado"
+        elif projecao is None:
+            classificacao = "—"
+        else:
+            razao = projecao / valor_meta
+
+            if razao >= 1:
+                classificacao = "Acima da meta"
+            elif razao >= 0.9:
+                classificacao = "Dentro do ritmo"
+            elif razao >= 0.7:
+                classificacao = "Risco moderado"
+            else:
+                classificacao = "Risco alto"
+
+        linhas.append(
+            {
+                "id": linha_meta["id"],
+                "canal": linha_meta["canal"],
+                "rotulo": linha_meta.get("rotulo") or "",
+                "referencia_inicio": referencia_inicio,
+                "referencia_fim": referencia_fim,
+                "realizado": realizado,
+                "meta": valor_meta,
+                "meta_diaria": (
+                    valor_meta / dias_totais if dias_totais else 0
+                ),
+                "gap": gap,
+                "atingido": atingido,
+                "ritmo_necessario": ritmo_necessario,
+                "projecao": projecao,
+                "classificacao": classificacao,
+            }
+        )
+
+    return pd.DataFrame(linhas, columns=colunas).sort_values(
+        ["referencia_inicio", "canal"],
+        ascending=[True, True],
     )
-
-    enriquecido["dias_restantes"] = (
-        enriquecido["dias_totais"] - enriquecido["dias_transcorridos"]
-    ).clip(lower=0)
-
-    meta_restante = (enriquecido["meta"] - enriquecido["realizado"]).clip(
-        lower=0
-    )
-
-    pode_calcular_ritmo = (
-        (enriquecido["meta"] > 0)
-        & enriquecido["periodo_em_andamento"]
-        & (enriquecido["dias_restantes"] > 0)
-    )
-
-    dias_restantes_seguro = enriquecido["dias_restantes"].where(
-        enriquecido["dias_restantes"] > 0
-    )
-
-    enriquecido["ritmo_necessario"] = (
-        meta_restante / dias_restantes_seguro
-    ).where(pode_calcular_ritmo)
-
-    dias_transcorridos_seguro = enriquecido["dias_transcorridos"].where(
-        enriquecido["dias_transcorridos"] > 0
-    )
-
-    enriquecido["projecao"] = (
-        enriquecido["realizado"]
-        / dias_transcorridos_seguro
-        * enriquecido["dias_totais"]
-    ).where(enriquecido["periodo_em_andamento"])
-
-    def _classificar(linha: pd.Series) -> str:
-        if linha["meta"] <= 0:
-            return "Sem meta"
-
-        if not linha["periodo_em_andamento"]:
-            return "Período encerrado"
-
-        if pd.isna(linha["projecao"]):
-            return "—"
-
-        razao = linha["projecao"] / linha["meta"]
-
-        if razao >= 1:
-            return "Acima da meta"
-
-        if razao >= 0.9:
-            return "Dentro do ritmo"
-
-        if razao >= 0.7:
-            return "Risco moderado"
-
-        return "Risco alto"
-
-    enriquecido["classificacao"] = enriquecido.apply(_classificar, axis=1)
-
-    return enriquecido
 
 
 # =========================================================
@@ -1657,112 +1654,101 @@ def exibir_dashboard() -> None:
 
     with aba_metas:
         metas_df = ler_metas()
+        historico_metas = ler_historico_diario()
 
-        aba_semanal, aba_mensal = st.tabs(["Semanal", "Mensal"])
+        comparativo = montar_comparativo(metas_df, historico_metas, hoje)
 
-        for aba, periodicidade in (
-            (aba_semanal, "semanal"),
-            (aba_mensal, "mensal"),
-        ):
-            with aba:
-                realizado = calcular_realizado_por_periodo(
-                    df_validos,
-                    periodicidade,
+        if comparativo.empty:
+            st.info(
+                "Nenhuma meta cadastrada ainda. Use \"Cadastrar meta\" "
+                "abaixo."
+            )
+        else:
+            tabela_comparativo = comparativo.copy()
+
+            tabela_comparativo["canal"] = tabela_comparativo[
+                "canal"
+            ].apply(nome_canal)
+
+            tabela_comparativo["periodo"] = (
+                tabela_comparativo["referencia_inicio"].apply(
+                    lambda valor: valor.strftime("%d/%m")
+                )
+                + " a "
+                + tabela_comparativo["referencia_fim"].apply(
+                    lambda valor: valor.strftime("%d/%m/%Y")
+                )
+            )
+
+            for coluna in ("realizado", "meta", "meta_diaria"):
+                tabela_comparativo[coluna] = tabela_comparativo[
+                    coluna
+                ].apply(moeda_br)
+
+            tabela_comparativo["gap"] = tabela_comparativo["gap"].apply(
+                lambda valor: (
+                    moeda_br(valor) if pd.notna(valor) else "Sem meta"
+                )
+            )
+
+            tabela_comparativo["atingido"] = tabela_comparativo[
+                "atingido"
+            ].apply(
+                lambda valor: (
+                    f"{valor:.0%}" if pd.notna(valor) else "Sem meta"
+                )
+            )
+
+            tabela_comparativo["ritmo_necessario"] = tabela_comparativo[
+                "ritmo_necessario"
+            ].apply(
+                lambda valor: (
+                    f"{moeda_br(valor)}/dia" if pd.notna(valor) else "—"
+                )
+            )
+
+            with st.container(border=True):
+                st.dataframe(
+                    tabela_comparativo.rename(
+                        columns={
+                            "canal": "Canal",
+                            "rotulo": "Rótulo",
+                            "periodo": "Período",
+                            "realizado": "Realizado",
+                            "meta": "Meta",
+                            "meta_diaria": "Meta diária",
+                            "gap": "Gap",
+                            "atingido": "Atingido",
+                            "ritmo_necessario": "Ritmo necessário",
+                            "classificacao": "Situação",
+                        }
+                    )[
+                        [
+                            "Canal",
+                            "Rótulo",
+                            "Período",
+                            "Realizado",
+                            "Meta",
+                            "Meta diária",
+                            "Gap",
+                            "Atingido",
+                            "Ritmo necessário",
+                            "Situação",
+                        ]
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
                 )
 
-                comparativo = montar_comparativo(
-                    realizado,
-                    metas_df,
-                    periodicidade,
-                )
+        st.markdown("<br>", unsafe_allow_html=True)
 
-                if comparativo.empty:
-                    st.info(
-                        "Nenhum dado de venda no período para comparar."
-                    )
-                    continue
+        coluna_form, coluna_excluir = st.columns(2)
 
-                comparativo = enriquecer_comparativo_com_ritmo(
-                    comparativo,
-                    periodicidade,
-                    hoje,
-                )
-
-                tabela_comparativo = comparativo.copy()
-
-                tabela_comparativo["canal"] = tabela_comparativo[
-                    "canal"
-                ].apply(nome_canal)
-
-                tabela_comparativo["referencia"] = tabela_comparativo[
-                    "referencia"
-                ].apply(lambda valor: valor.strftime("%d/%m/%Y"))
-
-                for coluna in ("realizado", "meta"):
-                    tabela_comparativo[coluna] = tabela_comparativo[
-                        coluna
-                    ].apply(moeda_br)
-
-                tabela_comparativo["gap"] = tabela_comparativo[
-                    "gap"
-                ].apply(
-                    lambda valor: (
-                        moeda_br(valor) if pd.notna(valor) else "Sem meta"
-                    )
-                )
-
-                tabela_comparativo["atingido"] = tabela_comparativo[
-                    "atingido"
-                ].apply(
-                    lambda valor: (
-                        f"{valor:.0%}" if pd.notna(valor) else "Sem meta"
-                    )
-                )
-
-                tabela_comparativo["ritmo_necessario"] = tabela_comparativo[
-                    "ritmo_necessario"
-                ].apply(
-                    lambda valor: (
-                        f"{moeda_br(valor)}/dia"
-                        if pd.notna(valor)
-                        else "—"
-                    )
-                )
-
-                with st.container(border=True):
-                    st.dataframe(
-                        tabela_comparativo.rename(
-                            columns={
-                                "canal": "Canal",
-                                "referencia": "Início do período",
-                                "realizado": "Realizado",
-                                "meta": "Meta",
-                                "gap": "Gap",
-                                "atingido": "Atingido",
-                                "ritmo_necessario": "Ritmo necessário",
-                                "classificacao": "Situação",
-                            }
-                        )[
-                            [
-                                "Canal",
-                                "Início do período",
-                                "Realizado",
-                                "Meta",
-                                "Gap",
-                                "Atingido",
-                                "Ritmo necessário",
-                                "Situação",
-                            ]
-                        ],
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-        with st.expander("Cadastrar ou atualizar meta"):
+        with coluna_form, st.expander("Cadastrar meta", expanded=True):
             with st.form("form_meta"):
                 canais_disponiveis = sorted(
                     df_validos["loja_id"].dropna().astype(str).unique()
-                )
+                ) + list(GRUPOS_CANAL.keys())
 
                 canal_meta = st.selectbox(
                     "Canal",
@@ -1770,17 +1756,22 @@ def exibir_dashboard() -> None:
                     format_func=nome_canal,
                 )
 
-                periodicidade_meta = st.radio(
-                    "Periodicidade",
-                    options=["semanal", "mensal"],
-                    horizontal=True,
+                rotulo_meta = st.text_input(
+                    "Rótulo (opcional, ex.: \"Semana 1\")",
                 )
 
-                referencia_meta = st.date_input(
-                    "Uma data dentro do período "
-                    "(semana: qualquer dia dela; mês: qualquer dia dele)",
+                coluna_data_1, coluna_data_2 = st.columns(2)
+
+                referencia_inicio_meta = coluna_data_1.date_input(
+                    "Início do período",
                     value=date.today(),
-                    key="referencia_meta",
+                    key="referencia_inicio_meta",
+                )
+
+                referencia_fim_meta = coluna_data_2.date_input(
+                    "Fim do período",
+                    value=date.today(),
+                    key="referencia_fim_meta",
                 )
 
                 valor_meta = st.number_input(
@@ -1792,20 +1783,45 @@ def exibir_dashboard() -> None:
                 enviar_meta = st.form_submit_button("Salvar meta")
 
                 if enviar_meta:
-                    referencia_normalizada = (
-                        inicio_semana(referencia_meta)
-                        if periodicidade_meta == "semanal"
-                        else inicio_mes(referencia_meta)
-                    )
+                    if referencia_fim_meta < referencia_inicio_meta:
+                        st.error(
+                            "O fim do período não pode ser antes do "
+                            "início."
+                        )
+                    else:
+                        salvar_meta(
+                            canal_meta,
+                            referencia_inicio_meta,
+                            referencia_fim_meta,
+                            valor_meta,
+                            rotulo_meta,
+                        )
 
-                    salvar_meta(
-                        canal_meta,
-                        periodicidade_meta,
-                        referencia_normalizada,
-                        valor_meta,
-                    )
+                        st.success("Meta salva com sucesso.")
+                        st.rerun()
 
-                    st.success("Meta salva com sucesso.")
+        with coluna_excluir, st.expander("Excluir meta", expanded=True):
+            if metas_df.empty:
+                st.caption("Nenhuma meta cadastrada.")
+            else:
+                opcoes_exclusao = {
+                    (
+                        f"{nome_canal(linha['canal'])} — "
+                        f"{linha['referencia_inicio'].strftime('%d/%m')} "
+                        f"a {linha['referencia_fim'].strftime('%d/%m/%Y')}"
+                        + (f" ({linha['rotulo']})" if linha["rotulo"] else "")
+                    ): linha["id"]
+                    for _, linha in metas_df.iterrows()
+                }
+
+                escolha_exclusao = st.selectbox(
+                    "Meta a excluir",
+                    options=list(opcoes_exclusao.keys()),
+                )
+
+                if st.button("Excluir meta selecionada"):
+                    excluir_meta(opcoes_exclusao[escolha_exclusao])
+                    st.success("Meta excluída.")
                     st.rerun()
 
 

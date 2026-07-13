@@ -36,10 +36,30 @@ NOMES_CANAL_CONHECIDOS = {
     "205971561": "Mercado Livre",
 }
 
+# Agrupamentos usados para metas que cobrem mais de um canal ao mesmo
+# tempo (ex.: uma meta única de "Marketplace" para Shopee + Mercado Livre).
+GRUPOS_CANAL: dict[str, list[str]] = {
+    "Marketplace": ["205939074", "205971561"],
+}
+
 
 def nome_canal(loja_id: Any) -> str:
-    chave = str(loja_id) if loja_id is not None else "Sem canal"
-    return NOMES_CANAL_CONHECIDOS.get(chave, f"Canal {chave}")
+    if loja_id is None:
+        return "Sem canal"
+
+    chave = str(loja_id)
+
+    if chave in NOMES_CANAL_CONHECIDOS:
+        return NOMES_CANAL_CONHECIDOS[chave]
+
+    if chave in GRUPOS_CANAL or not chave.isdigit():
+        return chave
+
+    return f"Canal {chave}"
+
+
+def canais_do_grupo(canal: str) -> list[str]:
+    return GRUPOS_CANAL.get(canal, [canal])
 
 
 def nome_situacao(situacao_id: int | None) -> str:
