@@ -13,11 +13,13 @@ from bling_core import (
     carregar_dataframe,
     carregar_historico_completo,
     gerar_url_autorizacao,
+    ler_itens_pedidos,
     ler_tokens,
     moeda_br,
     nome_canal,
     processar_callback_oauth,
     salvar_historico_diario,
+    sincronizar_itens_pedidos,
     supabase,
 )
 
@@ -1128,14 +1130,275 @@ def exibir_dashboard() -> None:
             )
 
     with aba_produto:
-        st.info(
-            "Em construção. O Bling só devolve SKU, quantidade e valor "
-            "dos itens no endpoint de detalhe do pedido (1 chamada de "
-            "API por pedido, não por página). Antes de implementar o "
-            "ranking de produtos, curva ABC e cesta de compra, vamos "
-            "combinar um período padrão (ex.: últimos 90 dias) para não "
-            "estourar o limite diário de requisições do Bling."
-        )
+        itens_periodo = ler_itens_pedidos(data_inicial, data_final)
+
+        with st.expander("Sincronização de itens"):
+            st.caption(
+                "Os itens de cada pedido exigem 1 chamada de API por "
+                "pedido (o Bling não devolve isso na lista). Pedidos já "
+                "sincronizados ficam salvos no Supabase e não são "
+                "buscados de novo."
+            )
+
+            if st.button("Sincronizar itens do período selecionado"):
+                barra = st.progress(0.0)
+
+                def _atualizar_barra(atual: int, total: int) -> None:
+                    if total:
+                        barra.progress(atual / total)
+
+                novos = sincronizar_itens_pedidos(
+                    df,
+                    progresso=_atualizar_barra,
+                )
+
+                st.success(
+                    f"{novos} pedido(s) sincronizado(s). "
+                    "Atualize a página para ver os dados novos."
+                )
+                ler_itens_pedidos.clear()
+
+        if itens_periodo.empty:
+            st.info(
+                "Nenhum item sincronizado para este período ainda. Use "
+                "\"Sincronizar itens do período selecionado\" acima."
+            )
+        else:
+            itens_validos = itens_periodo.loc[
+                ~itens_periodo["situacao_id"].isin(SITUACOES_CANCELADAS)
+            ].copy()
+
+            itens_validos["total_item"] = (
+                itens_validos["quantidade"]
+                * itens_validos["valor_unitario"]
+                - itens_validos["desconto"]
+            )
+
+            faturamento_produtos = float(
+                itens_validos["total_item"].sum()
+            )
+
+            ranking = (
+                itens_validos.groupby(
+                    ["sku", "descricao"], as_index=False
+                )
+                .agg(
+                    faturamento=("total_item", "sum"),
+                    unidades=("quantidade", "sum"),
+                    pedidos=("pedido_id", "nunique"),
+                )
+                .sort_values("faturamento", ascending=False)
+            )
+
+            skus_ativos = int(itens_validos["sku"].nunique())
+            unidades_vendidas = float(itens_validos["quantidade"].sum())
+            pedidos_sincronizados_periodo = int(
+                itens_validos["pedido_id"].nunique()
+            )
+
+            produto_lider = (
+                ranking.iloc[0]["descricao"] if not ranking.empty else "—"
+            )
+
+            st.markdown("#### Resumo de produtos")
+            st.caption(
+                f"Baseado em {pedidos_sincronizados_periodo} pedido(s) "
+                "já sincronizado(s) neste período (pode não ser 100% "
+                "dos pedidos do período — veja a sincronização acima)."
+            )
+
+            coluna_p1, coluna_p2, coluna_p3, coluna_p4 = st.columns(4)
+
+            with coluna_p1:
+                card_kpi("SKUs ativos", str(skus_ativos))
+
+            with coluna_p2:
+                card_kpi(
+                    "Unidades vendidas",
+                    f"{unidades_vendidas:,.0f}".replace(",", "."),
+                )
+
+            with coluna_p3:
+                card_kpi("Faturamento em itens", moeda_br(faturamento_produtos))
+
+            with coluna_p4:
+                card_kpi("Produto líder", produto_lider)
+
+            st.divider()
+            st.markdown("#### Ranking de produtos")
+
+            with st.container(border=True):
+                top_produtos = ranking.head(10)
+
+                grafico_ranking = px.bar(
+                    top_produtos,
+                    x="faturamento",
+                    y="descricao",
+                    orientation="h",
+                    title="Top 10 produtos por faturamento",
+                    labels={
+                        "descricao": "Produto",
+                        "faturamento": "Faturamento",
+                    },
+                )
+
+                grafico_ranking.update_yaxes(
+                    categoryorder="total ascending"
+                )
+
+                st.plotly_chart(
+                    grafico_ranking,
+                    use_container_width=True,
+                )
+
+                tabela_ranking = ranking.copy()
+                tabela_ranking["faturamento"] = tabela_ranking[
+                    "faturamento"
+                ].apply(moeda_br)
+
+                st.dataframe(
+                    tabela_ranking.rename(
+                        columns={
+                            "sku": "SKU",
+                            "descricao": "Produto",
+                            "faturamento": "Faturamento",
+                            "unidades": "Unidades",
+                            "pedidos": "Pedidos",
+                        }
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            st.divider()
+            st.markdown("#### Curva ABC (por faturamento)")
+
+            with st.container(border=True):
+                curva_abc = ranking.copy()
+
+                curva_abc["participacao"] = (
+                    curva_abc["faturamento"] / faturamento_produtos
+                    if faturamento_produtos
+                    else 0
+                )
+
+                curva_abc["acumulado"] = curva_abc["participacao"].cumsum()
+
+                curva_abc["classe"] = curva_abc["acumulado"].apply(
+                    lambda acumulado: (
+                        "A"
+                        if acumulado <= 0.8
+                        else ("B" if acumulado <= 0.95 else "C")
+                    )
+                )
+
+                resumo_abc = (
+                    curva_abc.groupby("classe", as_index=False)
+                    .agg(
+                        produtos=("sku", "nunique"),
+                        faturamento=("faturamento", "sum"),
+                    )
+                )
+
+                resumo_abc["participacao"] = (
+                    resumo_abc["faturamento"] / faturamento_produtos
+                    if faturamento_produtos
+                    else 0
+                )
+
+                coluna_abc, coluna_abc_tabela = st.columns([2, 1])
+
+                with coluna_abc:
+                    grafico_abc = px.bar(
+                        curva_abc,
+                        x="descricao",
+                        y="acumulado",
+                        color="classe",
+                        title="Participação acumulada na receita",
+                        labels={
+                            "descricao": "Produto",
+                            "acumulado": "Participação acumulada",
+                        },
+                    )
+
+                    grafico_abc.update_yaxes(tickformat=".0%")
+                    grafico_abc.update_xaxes(
+                        showticklabels=False,
+                    )
+
+                    st.plotly_chart(
+                        grafico_abc,
+                        use_container_width=True,
+                    )
+
+                with coluna_abc_tabela:
+                    tabela_abc = resumo_abc.copy()
+                    tabela_abc["faturamento"] = tabela_abc[
+                        "faturamento"
+                    ].apply(moeda_br)
+                    tabela_abc["participacao"] = tabela_abc[
+                        "participacao"
+                    ].apply(lambda valor: f"{valor:.1%}")
+
+                    st.dataframe(
+                        tabela_abc.rename(
+                            columns={
+                                "classe": "Classe",
+                                "produtos": "Produtos",
+                                "faturamento": "Faturamento",
+                                "participacao": "Participação",
+                            }
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            st.divider()
+            st.markdown("#### Produtos comprados juntos")
+
+            with st.container(border=True):
+                pares_encontrados: dict[tuple[str, str], int] = {}
+
+                for _, grupo in itens_validos.groupby("pedido_id"):
+                    skus_pedido = sorted(
+                        grupo["sku"].dropna().unique().tolist()
+                    )
+
+                    for i in range(len(skus_pedido)):
+                        for j in range(i + 1, len(skus_pedido)):
+                            par = (skus_pedido[i], skus_pedido[j])
+                            pares_encontrados[par] = (
+                                pares_encontrados.get(par, 0) + 1
+                            )
+
+                if not pares_encontrados:
+                    st.info(
+                        "Nenhum pedido com mais de um produto diferente "
+                        "neste período."
+                    )
+                else:
+                    cesta = pd.DataFrame(
+                        [
+                            {
+                                "produto_a": par[0],
+                                "produto_b": par[1],
+                                "pedidos_juntos": contagem,
+                            }
+                            for par, contagem in pares_encontrados.items()
+                        ]
+                    ).sort_values("pedidos_juntos", ascending=False)
+
+                    st.dataframe(
+                        cesta.head(15).rename(
+                            columns={
+                                "produto_a": "Produto A",
+                                "produto_b": "Produto B",
+                                "pedidos_juntos": "Pedidos juntos",
+                            }
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
     with aba_preditivo:
         st.info(

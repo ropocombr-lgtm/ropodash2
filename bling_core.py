@@ -579,3 +579,145 @@ def ler_historico_diario(
     historico["data"] = pd.to_datetime(historico["data"]).dt.date
 
     return historico[colunas]
+
+
+# =========================================================
+# ITENS DOS PEDIDOS (produto)
+# =========================================================
+
+def buscar_detalhe_pedido(pedido_id: int) -> dict[str, Any]:
+    resposta = consultar_bling(f"/pedidos/vendas/{pedido_id}")
+    return resposta.get("data", {})
+
+
+def pedidos_ja_sincronizados(pedido_ids: list[int]) -> set[int]:
+    sincronizados: set[int] = set()
+
+    for lote in range(0, len(pedido_ids), 500):
+        pedaco = pedido_ids[lote : lote + 500]
+
+        resposta = (
+            supabase.table("pedidos_sincronizados")
+            .select("pedido_id")
+            .in_("pedido_id", pedaco)
+            .execute()
+        )
+
+        sincronizados.update(
+            linha["pedido_id"] for linha in (resposta.data or [])
+        )
+
+    return sincronizados
+
+
+def sincronizar_itens_pedidos(
+    df: pd.DataFrame,
+    limite_pedidos: int | None = None,
+    progresso: Any = None,
+) -> int:
+    if df.empty:
+        return 0
+
+    pedidos_unicos = (
+        df.dropna(subset=["id"])
+        .drop_duplicates(subset=["id"])
+        .set_index("id")
+    )
+
+    pendentes = sorted(
+        set(pedidos_unicos.index)
+        - pedidos_ja_sincronizados(list(pedidos_unicos.index))
+    )
+
+    if limite_pedidos is not None:
+        pendentes = pendentes[:limite_pedidos]
+
+    total_pendentes = len(pendentes)
+
+    for indice, pedido_id in enumerate(pendentes):
+        contexto = pedidos_unicos.loc[pedido_id]
+
+        detalhe = buscar_detalhe_pedido(pedido_id)
+        itens = detalhe.get("itens") or []
+
+        registros_item = [
+            {
+                "pedido_id": int(pedido_id),
+                "item_id": item.get("id"),
+                "produto_id": (item.get("produto") or {}).get("id"),
+                "sku": item.get("codigo"),
+                "descricao": item.get("descricao"),
+                "quantidade": item.get("quantidade", 0),
+                "valor_unitario": item.get("valor", 0),
+                "desconto": item.get("desconto", 0),
+                "data": contexto["data"].date().isoformat(),
+                "canal": str(contexto["loja_id"]),
+                "situacao_id": (
+                    int(contexto["situacao_id"])
+                    if pd.notna(contexto["situacao_id"])
+                    else None
+                ),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            for item in itens
+            if item.get("id") is not None
+        ]
+
+        if registros_item:
+            supabase.table("itens_pedidos").upsert(
+                registros_item,
+                on_conflict="pedido_id,item_id",
+            ).execute()
+
+        supabase.table("pedidos_sincronizados").upsert(
+            {
+                "pedido_id": int(pedido_id),
+                "sincronizado_em": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="pedido_id",
+        ).execute()
+
+        if progresso is not None:
+            progresso(indice + 1, total_pendentes)
+
+        # Mantém o consumo abaixo de três chamadas por segundo.
+        time.sleep(0.4)
+
+    return total_pendentes
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def ler_itens_pedidos(
+    data_inicial: date,
+    data_final: date,
+) -> pd.DataFrame:
+    resposta = (
+        supabase.table("itens_pedidos")
+        .select("*")
+        .gte("data", data_inicial.isoformat())
+        .lte("data", data_final.isoformat())
+        .execute()
+    )
+
+    dados = resposta.data or []
+
+    colunas = [
+        "pedido_id",
+        "produto_id",
+        "sku",
+        "descricao",
+        "quantidade",
+        "valor_unitario",
+        "desconto",
+        "data",
+        "canal",
+        "situacao_id",
+    ]
+
+    if not dados:
+        return pd.DataFrame(columns=colunas)
+
+    itens = pd.DataFrame(dados)
+    itens["data"] = pd.to_datetime(itens["data"]).dt.date
+
+    return itens[colunas]
