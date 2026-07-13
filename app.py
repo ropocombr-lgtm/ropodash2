@@ -9,11 +9,14 @@ import streamlit as st
 
 from bling_core import (
     SITUACOES_CANCELADAS,
+    calcular_historico_diario,
     carregar_dataframe,
     gerar_url_autorizacao,
     ler_tokens,
     moeda_br,
+    nome_canal,
     processar_callback_oauth,
+    salvar_historico_diario,
     supabase,
 )
 
@@ -220,6 +223,8 @@ def exibir_dashboard() -> None:
     if df.empty:
         st.info("Nenhum pedido foi encontrado no período selecionado.")
         return
+
+    salvar_historico_diario(calcular_historico_diario(df))
 
     cancelados = df["situacao_id"].isin(SITUACOES_CANCELADAS)
 
@@ -470,9 +475,7 @@ def exibir_dashboard() -> None:
         with coluna_canal:
             receita_por_canal = (
                 df_validos.assign(
-                    canal=lambda d: d["loja_id"].fillna(
-                        "Sem canal"
-                    ).astype(str)
+                    canal=lambda d: d["loja_id"].apply(nome_canal)
                 )
                 .groupby("canal", as_index=False)
                 .agg(faturamento=("total", "sum"))
@@ -483,7 +486,7 @@ def exibir_dashboard() -> None:
                 receita_por_canal,
                 x="canal",
                 y="faturamento",
-                title="Receita por canal (ID da loja)",
+                title="Receita por canal",
                 labels={
                     "canal": "Canal",
                     "faturamento": "Faturamento",
@@ -498,9 +501,7 @@ def exibir_dashboard() -> None:
         with coluna_cancelamento_canal:
             cancelamento_por_canal = (
                 df.assign(
-                    canal=lambda d: d["loja_id"].fillna(
-                        "Sem canal"
-                    ).astype(str),
+                    canal=lambda d: d["loja_id"].apply(nome_canal),
                     cancelado=cancelados,
                 )
                 .groupby("canal", as_index=False)
@@ -609,6 +610,10 @@ def exibir_dashboard() -> None:
 
                 tabela_comparativo = comparativo.copy()
 
+                tabela_comparativo["canal"] = tabela_comparativo[
+                    "canal"
+                ].apply(nome_canal)
+
                 tabela_comparativo["referencia"] = tabela_comparativo[
                     "referencia"
                 ].apply(lambda valor: valor.strftime("%d/%m/%Y"))
@@ -656,8 +661,9 @@ def exibir_dashboard() -> None:
                 )
 
                 canal_meta = st.selectbox(
-                    "Canal (ID da loja)",
+                    "Canal",
                     options=canais_disponiveis or ["Sem canal"],
+                    format_func=nome_canal,
                 )
 
                 periodicidade_meta = st.radio(

@@ -28,6 +28,19 @@ NOMES_SITUACAO_CONHECIDAS = {
     12: "Cancelado",
 }
 
+# Mapeamento manual: a API não expõe nome de canal sem o escopo
+# "Canais de venda", que este app não tem (exigiria reautorizar).
+NOMES_CANAL_CONHECIDOS = {
+    "205971033": "Loja própria",
+    "205939074": "Shopee",
+    "205971561": "Mercado Livre",
+}
+
+
+def nome_canal(loja_id: Any) -> str:
+    chave = str(loja_id) if loja_id is not None else "Sem canal"
+    return NOMES_CANAL_CONHECIDOS.get(chave, f"Canal {chave}")
+
 
 def nome_situacao(situacao_id: int | None) -> str:
     if situacao_id is None:
@@ -427,3 +440,105 @@ def moeda_br(valor: float) -> str:
     texto = f"{valor:,.2f}"
     texto = texto.replace(",", "X").replace(".", ",").replace("X", ".")
     return f"R$ {texto}"
+
+
+# =========================================================
+# HISTÓRICO DIÁRIO DE KPIS
+# =========================================================
+
+def calcular_historico_diario(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "dia",
+                "canal",
+                "pedidos",
+                "cancelados",
+                "faturamento_bruto",
+                "faturamento_valido",
+            ]
+        )
+
+    dados = df.dropna(subset=["data"]).copy()
+    dados["dia"] = dados["data"].dt.date
+    dados["canal"] = dados["loja_id"].fillna("Sem canal").astype(str)
+    dados["cancelado"] = dados["situacao_id"].isin(SITUACOES_CANCELADAS)
+
+    agregado = (
+        dados.groupby(["dia", "canal"], as_index=False)
+        .agg(
+            pedidos=("id", "nunique"),
+            cancelados=("cancelado", "sum"),
+            faturamento_bruto=("total", "sum"),
+        )
+    )
+
+    faturamento_valido = (
+        dados.loc[~dados["cancelado"]]
+        .groupby(["dia", "canal"], as_index=False)
+        .agg(faturamento_valido=("total", "sum"))
+    )
+
+    agregado = agregado.merge(
+        faturamento_valido,
+        on=["dia", "canal"],
+        how="left",
+    )
+
+    agregado["faturamento_valido"] = agregado["faturamento_valido"].fillna(
+        0
+    )
+
+    return agregado
+
+
+def salvar_historico_diario(agregado: pd.DataFrame) -> None:
+    if agregado.empty:
+        return
+
+    registros = [
+        {
+            "data": linha["dia"].isoformat(),
+            "canal": linha["canal"],
+            "pedidos": int(linha["pedidos"]),
+            "cancelados": int(linha["cancelados"]),
+            "faturamento_bruto": float(linha["faturamento_bruto"]),
+            "faturamento_valido": float(linha["faturamento_valido"]),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        for _, linha in agregado.iterrows()
+    ]
+
+    supabase.table("historico_diario").upsert(
+        registros,
+        on_conflict="data,canal",
+    ).execute()
+
+
+def ler_historico_diario(
+    data_inicial: date | None = None,
+) -> pd.DataFrame:
+    consulta = supabase.table("historico_diario").select("*")
+
+    if data_inicial is not None:
+        consulta = consulta.gte("data", data_inicial.isoformat())
+
+    resposta = consulta.execute()
+    dados = resposta.data or []
+
+    colunas = [
+        "data",
+        "canal",
+        "pedidos",
+        "cancelados",
+        "faturamento_bruto",
+        "faturamento_valido",
+    ]
+
+    if not dados:
+        return pd.DataFrame(columns=colunas)
+
+    historico = pd.DataFrame(dados)
+    historico["data"] = pd.to_datetime(historico["data"]).dt.date
+
+    return historico[colunas]
