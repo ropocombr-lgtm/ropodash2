@@ -11,6 +11,7 @@ from bling_core import (
     SITUACOES_CANCELADAS,
     calcular_historico_diario,
     carregar_dataframe,
+    carregar_historico_completo,
     gerar_url_autorizacao,
     ler_tokens,
     moeda_br,
@@ -19,6 +20,16 @@ from bling_core import (
     salvar_historico_diario,
     supabase,
 )
+
+NOMES_DIA_SEMANA = {
+    0: "Segunda",
+    1: "Terça",
+    2: "Quarta",
+    3: "Quinta",
+    4: "Sexta",
+    5: "Sábado",
+    6: "Domingo",
+}
 
 # =========================================================
 # CONFIGURAÇÃO DA PÁGINA
@@ -131,6 +142,106 @@ def montar_comparativo(
     )
 
 
+def fim_periodo(referencia: date, periodicidade: str) -> date:
+    if periodicidade == "semanal":
+        return referencia + timedelta(days=6)
+
+    dias_no_mes = calendar.monthrange(referencia.year, referencia.month)[1]
+    return referencia.replace(day=dias_no_mes)
+
+
+def enriquecer_comparativo_com_ritmo(
+    comparativo: pd.DataFrame,
+    periodicidade: str,
+    hoje: date,
+) -> pd.DataFrame:
+    enriquecido = comparativo.copy()
+
+    enriquecido["fim_periodo"] = enriquecido["referencia"].apply(
+        lambda referencia: fim_periodo(referencia, periodicidade)
+    )
+
+    enriquecido["dias_totais"] = [
+        (fim - referencia).days + 1
+        for fim, referencia in zip(
+            enriquecido["fim_periodo"], enriquecido["referencia"]
+        )
+    ]
+
+    enriquecido["periodo_em_andamento"] = enriquecido["fim_periodo"] >= hoje
+
+    def _dias_transcorridos(linha: pd.Series) -> int:
+        fim_considerado = min(hoje, linha["fim_periodo"])
+
+        if fim_considerado < linha["referencia"]:
+            return 0
+
+        return (fim_considerado - linha["referencia"]).days + 1
+
+    enriquecido["dias_transcorridos"] = enriquecido.apply(
+        _dias_transcorridos, axis=1
+    )
+
+    enriquecido["dias_restantes"] = (
+        enriquecido["dias_totais"] - enriquecido["dias_transcorridos"]
+    ).clip(lower=0)
+
+    meta_restante = (enriquecido["meta"] - enriquecido["realizado"]).clip(
+        lower=0
+    )
+
+    pode_calcular_ritmo = (
+        (enriquecido["meta"] > 0)
+        & enriquecido["periodo_em_andamento"]
+        & (enriquecido["dias_restantes"] > 0)
+    )
+
+    dias_restantes_seguro = enriquecido["dias_restantes"].where(
+        enriquecido["dias_restantes"] > 0
+    )
+
+    enriquecido["ritmo_necessario"] = (
+        meta_restante / dias_restantes_seguro
+    ).where(pode_calcular_ritmo)
+
+    dias_transcorridos_seguro = enriquecido["dias_transcorridos"].where(
+        enriquecido["dias_transcorridos"] > 0
+    )
+
+    enriquecido["projecao"] = (
+        enriquecido["realizado"]
+        / dias_transcorridos_seguro
+        * enriquecido["dias_totais"]
+    ).where(enriquecido["periodo_em_andamento"])
+
+    def _classificar(linha: pd.Series) -> str:
+        if linha["meta"] <= 0:
+            return "Sem meta"
+
+        if not linha["periodo_em_andamento"]:
+            return "Período encerrado"
+
+        if pd.isna(linha["projecao"]):
+            return "—"
+
+        razao = linha["projecao"] / linha["meta"]
+
+        if razao >= 1:
+            return "Acima da meta"
+
+        if razao >= 0.9:
+            return "Dentro do ritmo"
+
+        if razao >= 0.7:
+            return "Risco moderado"
+
+        return "Risco alto"
+
+    enriquecido["classificacao"] = enriquecido.apply(_classificar, axis=1)
+
+    return enriquecido
+
+
 # =========================================================
 # ANÁLISE COMERCIAL
 # =========================================================
@@ -240,6 +351,14 @@ def exibir_dashboard() -> None:
     )
 
     quantidade_cancelados = int(df.loc[cancelados, "id"].nunique())
+    quantidade_pedidos_totais = int(df["id"].nunique())
+    valor_cancelado = float(df.loc[cancelados, "total"].sum())
+
+    taxa_cancelamento = (
+        quantidade_cancelados / quantidade_pedidos_totais
+        if quantidade_pedidos_totais
+        else 0
+    )
 
     aba_comercial, aba_produto, aba_preditivo, aba_metas = st.tabs(
         ["📈 Comercial", "🛒 Produto", "🔮 Preditivo", "🎯 Metas"]
@@ -266,6 +385,18 @@ def exibir_dashboard() -> None:
         coluna_4.metric(
             "Cancelados",
             f"{quantidade_cancelados:,}".replace(",", "."),
+        )
+
+        coluna_c1, coluna_c2 = st.columns(2)
+
+        coluna_c1.metric(
+            "Taxa de cancelamento",
+            f"{taxa_cancelamento:.1%}",
+        )
+
+        coluna_c2.metric(
+            "Valor cancelado",
+            moeda_br(valor_cancelado),
         )
 
         st.caption(
@@ -470,18 +601,65 @@ def exibir_dashboard() -> None:
                 use_container_width=True,
             )
 
+        st.subheader("Canais")
+
+        receita_por_canal = (
+            df_validos.assign(
+                canal=lambda d: d["loja_id"].apply(nome_canal)
+            )
+            .groupby("canal", as_index=False)
+            .agg(
+                faturamento=("total", "sum"),
+                pedidos=("id", "nunique"),
+            )
+            .sort_values("faturamento", ascending=False)
+        )
+
+        receita_por_canal["ticket_medio"] = (
+            receita_por_canal["faturamento"] / receita_por_canal["pedidos"]
+        )
+
+        receita_por_canal["participacao"] = (
+            receita_por_canal["faturamento"] / faturamento
+            if faturamento
+            else 0
+        )
+
+        if df_periodo_anterior.empty:
+            receita_por_canal["faturamento_anterior"] = 0.0
+        else:
+            faturamento_anterior_por_canal = (
+                df_periodo_anterior.loc[
+                    ~df_periodo_anterior["situacao_id"].isin(
+                        SITUACOES_CANCELADAS
+                    )
+                ]
+                .assign(canal=lambda d: d["loja_id"].apply(nome_canal))
+                .groupby("canal", as_index=False)
+                .agg(faturamento_anterior=("total", "sum"))
+            )
+
+            receita_por_canal = receita_por_canal.merge(
+                faturamento_anterior_por_canal,
+                on="canal",
+                how="left",
+            )
+
+            receita_por_canal["faturamento_anterior"] = receita_por_canal[
+                "faturamento_anterior"
+            ].fillna(0)
+
+        receita_por_canal["crescimento"] = receita_por_canal.apply(
+            lambda linha: variacao_percentual(
+                linha["faturamento"],
+                linha["faturamento_anterior"],
+            ),
+            axis=1,
+        )
+
         coluna_canal, coluna_cancelamento_canal = st.columns(2)
 
         with coluna_canal:
-            receita_por_canal = (
-                df_validos.assign(
-                    canal=lambda d: d["loja_id"].apply(nome_canal)
-                )
-                .groupby("canal", as_index=False)
-                .agg(faturamento=("total", "sum"))
-                .sort_values("faturamento", ascending=False)
-            )
-
             grafico_canal = px.bar(
                 receita_por_canal,
                 x="canal",
@@ -534,6 +712,224 @@ def exibir_dashboard() -> None:
                 use_container_width=True,
             )
 
+        tabela_canal = receita_por_canal.copy()
+
+        tabela_canal["faturamento"] = tabela_canal["faturamento"].apply(
+            moeda_br
+        )
+        tabela_canal["ticket_medio"] = tabela_canal["ticket_medio"].apply(
+            moeda_br
+        )
+        tabela_canal["participacao"] = tabela_canal["participacao"].apply(
+            lambda valor: f"{valor:.1%}"
+        )
+        tabela_canal["crescimento"] = tabela_canal["crescimento"].apply(
+            lambda valor: (
+                f"{valor:+.1%}" if pd.notna(valor) else "Sem base anterior"
+            )
+        )
+
+        st.dataframe(
+            tabela_canal[
+                [
+                    "canal",
+                    "faturamento",
+                    "pedidos",
+                    "ticket_medio",
+                    "participacao",
+                    "crescimento",
+                ]
+            ].rename(
+                columns={
+                    "canal": "Canal",
+                    "faturamento": "Faturamento",
+                    "pedidos": "Pedidos",
+                    "ticket_medio": "Ticket médio",
+                    "participacao": "Participação",
+                    "crescimento": "Vs. período anterior",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.divider()
+        st.subheader("Dia da semana")
+
+        dados_semana = df.dropna(subset=["data"]).copy()
+        dados_semana["dia_semana_idx"] = dados_semana["data"].dt.dayofweek
+        dados_semana["cancelado"] = dados_semana["situacao_id"].isin(
+            SITUACOES_CANCELADAS
+        )
+
+        por_dia_semana = dados_semana.groupby(
+            "dia_semana_idx", as_index=False
+        ).agg(
+            pedidos=("id", "nunique"),
+            cancelados=("cancelado", "sum"),
+        )
+
+        faturamento_por_dia_semana = (
+            dados_semana.loc[~dados_semana["cancelado"]]
+            .groupby("dia_semana_idx", as_index=False)
+            .agg(faturamento=("total", "sum"))
+        )
+
+        por_dia_semana = por_dia_semana.merge(
+            faturamento_por_dia_semana,
+            on="dia_semana_idx",
+            how="left",
+        )
+
+        por_dia_semana["faturamento"] = por_dia_semana[
+            "faturamento"
+        ].fillna(0)
+
+        por_dia_semana["taxa_cancelamento"] = (
+            por_dia_semana["cancelados"] / por_dia_semana["pedidos"]
+        )
+
+        por_dia_semana["dia_semana"] = por_dia_semana[
+            "dia_semana_idx"
+        ].map(NOMES_DIA_SEMANA)
+
+        por_dia_semana = por_dia_semana.sort_values("dia_semana_idx")
+
+        grafico_dia_semana = px.bar(
+            por_dia_semana,
+            x="dia_semana",
+            y="faturamento",
+            title="Faturamento por dia da semana",
+            labels={
+                "dia_semana": "Dia da semana",
+                "faturamento": "Faturamento",
+            },
+        )
+
+        st.plotly_chart(
+            grafico_dia_semana,
+            use_container_width=True,
+        )
+
+        st.divider()
+        st.subheader("Clientes novos vs. recorrentes")
+
+        historico_completo = carregar_historico_completo(
+            data_final.isoformat(),
+            3,
+        )
+
+        if (
+            historico_completo.empty
+            or "cliente_id" not in historico_completo.columns
+            or df_validos["cliente_id"].dropna().empty
+        ):
+            st.info(
+                "Ainda não há histórico suficiente de clientes para essa "
+                "análise."
+            )
+        else:
+            primeira_compra = (
+                historico_completo.dropna(subset=["cliente_id", "data"])
+                .groupby("cliente_id")["data"]
+                .min()
+                .dt.date
+            )
+
+            pedidos_por_cliente_historico = (
+                historico_completo.dropna(subset=["cliente_id"])
+                .groupby("cliente_id")["id"]
+                .nunique()
+            )
+
+            df_status_cliente = df_validos.dropna(
+                subset=["cliente_id"]
+            ).copy()
+
+            df_status_cliente["primeira_compra"] = df_status_cliente[
+                "cliente_id"
+            ].map(primeira_compra)
+
+            df_status_cliente["cliente_novo"] = (
+                df_status_cliente["primeira_compra"] >= data_inicial
+            )
+
+            resumo_status = (
+                df_status_cliente.groupby("cliente_novo")
+                .agg(
+                    clientes=("cliente_id", "nunique"),
+                    pedidos=("id", "nunique"),
+                    receita=("total", "sum"),
+                )
+            )
+
+            def _linha_status(novo: bool) -> tuple:
+                if novo not in resumo_status.index:
+                    return (0, 0, 0.0, 0.0)
+
+                linha = resumo_status.loc[novo]
+                ticket = (
+                    linha["receita"] / linha["pedidos"]
+                    if linha["pedidos"]
+                    else 0.0
+                )
+
+                return (
+                    int(linha["clientes"]),
+                    int(linha["pedidos"]),
+                    float(linha["receita"]),
+                    ticket,
+                )
+
+            clientes_novos, pedidos_novos, receita_novos, ticket_novos = (
+                _linha_status(True)
+            )
+
+            (
+                clientes_recorrentes,
+                pedidos_recorrentes,
+                receita_recorrentes,
+                ticket_recorrentes,
+            ) = _linha_status(False)
+
+            coluna_novo, coluna_recorrente = st.columns(2)
+
+            with coluna_novo:
+                st.markdown("**Clientes novos**")
+                st.metric("Clientes", clientes_novos)
+                st.metric("Receita", moeda_br(receita_novos))
+                st.metric("Ticket médio", moeda_br(ticket_novos))
+
+            with coluna_recorrente:
+                st.markdown("**Clientes recorrentes**")
+                st.metric("Clientes", clientes_recorrentes)
+                st.metric("Receita", moeda_br(receita_recorrentes))
+                st.metric("Ticket médio", moeda_br(ticket_recorrentes))
+
+            clientes_2_ou_mais = int(
+                (pedidos_por_cliente_historico >= 2).sum()
+            )
+            clientes_3_ou_mais = int(
+                (pedidos_por_cliente_historico >= 3).sum()
+            )
+            total_clientes_historico = int(
+                pedidos_por_cliente_historico.shape[0]
+            )
+
+            taxa_recompra = (
+                clientes_2_ou_mais / total_clientes_historico
+                if total_clientes_historico
+                else 0
+            )
+
+            st.caption(
+                f"Taxa de recompra (últimos 3 anos): {taxa_recompra:.1%} "
+                f"— {clientes_2_ou_mais} com 2+ pedidos e "
+                f"{clientes_3_ou_mais} com 3+ pedidos, de "
+                f"{total_clientes_historico} clientes únicos."
+            )
+
+        st.divider()
         st.subheader("Pedidos do período")
 
         tabela = df.sort_values(
@@ -608,6 +1004,12 @@ def exibir_dashboard() -> None:
                     )
                     continue
 
+                comparativo = enriquecer_comparativo_com_ritmo(
+                    comparativo,
+                    periodicidade,
+                    hoje,
+                )
+
                 tabela_comparativo = comparativo.copy()
 
                 tabela_comparativo["canal"] = tabela_comparativo[
@@ -639,6 +1041,16 @@ def exibir_dashboard() -> None:
                     )
                 )
 
+                tabela_comparativo["ritmo_necessario"] = tabela_comparativo[
+                    "ritmo_necessario"
+                ].apply(
+                    lambda valor: (
+                        f"{moeda_br(valor)}/dia"
+                        if pd.notna(valor)
+                        else "—"
+                    )
+                )
+
                 st.dataframe(
                     tabela_comparativo.rename(
                         columns={
@@ -648,8 +1060,21 @@ def exibir_dashboard() -> None:
                             "meta": "Meta",
                             "gap": "Gap",
                             "atingido": "Atingido",
+                            "ritmo_necessario": "Ritmo necessário",
+                            "classificacao": "Situação",
                         }
-                    ),
+                    )[
+                        [
+                            "Canal",
+                            "Início do período",
+                            "Realizado",
+                            "Meta",
+                            "Gap",
+                            "Atingido",
+                            "Ritmo necessário",
+                            "Situação",
+                        ]
+                    ],
                     use_container_width=True,
                     hide_index=True,
                 )

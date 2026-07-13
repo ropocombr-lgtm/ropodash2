@@ -391,6 +391,7 @@ def transformar_pedidos(
                 "id": pedido.get("id"),
                 "numero": pedido.get("numero"),
                 "data": pedido.get("data"),
+                "cliente_id": contato.get("id"),
                 "cliente": contato.get("nome", "Não informado"),
                 "situacao_id": situacao_id,
                 "situacao": nome_situacao(situacao_id),
@@ -434,6 +435,42 @@ def carregar_dataframe(
     )
 
     return transformar_pedidos(pedidos)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def carregar_historico_completo(
+    data_final_iso: str,
+    anos: int,
+) -> pd.DataFrame:
+    data_final = date.fromisoformat(data_final_iso)
+    inicio_total = data_final.replace(year=data_final.year - anos)
+
+    partes = []
+    cursor = inicio_total
+
+    # O Bling recomenda não enviar filtros de data acima de 1 ano numa
+    # única consulta, então buscamos em janelas anuais.
+    while cursor <= data_final:
+        fim_janela = min(
+            cursor + timedelta(days=364),
+            data_final,
+        )
+
+        partes.append(
+            carregar_dataframe(
+                cursor.isoformat(),
+                fim_janela.isoformat(),
+            )
+        )
+
+        cursor = fim_janela + timedelta(days=1)
+
+    partes_validas = [parte for parte in partes if not parte.empty]
+
+    if not partes_validas:
+        return pd.DataFrame()
+
+    return pd.concat(partes_validas, ignore_index=True)
 
 
 def moeda_br(valor: float) -> str:
