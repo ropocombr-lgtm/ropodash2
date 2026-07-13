@@ -41,6 +41,117 @@ st.set_page_config(
     layout="wide",
 )
 
+st.markdown(
+    """
+    <style>
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+        max-width: 1400px;
+    }
+
+    h1, h2, h3 {
+        color: #0F172A;
+    }
+
+    .dashboard-subtitle {
+        color: #64748B;
+        font-size: 0.95rem;
+        margin-top: -8px;
+        margin-bottom: 4px;
+    }
+
+    .dashboard-badges {
+        color: #64748B;
+        font-size: 0.85rem;
+        margin-bottom: 20px;
+    }
+
+    .kpi-card {
+        background: white;
+        border: 1px solid #E2E8F0;
+        border-radius: 18px;
+        padding: 16px 18px;
+        box-shadow: 0 4px 14px rgba(15, 23, 42, 0.05);
+        height: 100%;
+    }
+
+    .small-label {
+        font-size: 0.8rem;
+        color: #64748B;
+        margin-bottom: 6px;
+    }
+
+    .big-number {
+        font-size: 1.7rem;
+        font-weight: 700;
+        color: #0F172A;
+        line-height: 1.2;
+    }
+
+    .delta {
+        font-size: 0.8rem;
+        font-weight: 600;
+        margin-top: 4px;
+    }
+
+    .delta.good {
+        color: #16A34A;
+    }
+
+    .delta.bad {
+        color: #DC2626;
+    }
+
+    .delta.neutral {
+        color: #64748B;
+    }
+
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        background: #EFF6FF;
+        border-radius: 12px;
+        padding: 10px 16px;
+        height: auto;
+    }
+
+    .stTabs [aria-selected="true"] {
+        background: #2563EB !important;
+        color: white !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def card_kpi(
+    titulo: str,
+    valor: str,
+    subtitulo: str = "",
+    delta: str | None = None,
+    delta_tipo: str = "neutral",
+) -> None:
+    delta_html = (
+        f'<div class="delta {delta_tipo}">{delta}</div>' if delta else ""
+    )
+
+    st.markdown(
+        f"""
+        <div class="kpi-card">
+            <div class="small-label">{titulo}</div>
+            <div class="big-number">{valor}</div>
+            <div class="small-label">{subtitulo}</div>
+            {delta_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 processar_callback_oauth()
 
 
@@ -266,8 +377,13 @@ def variacao_percentual(atual: float, anterior: float) -> float | None:
 # INTERFACE
 # =========================================================
 
-st.title("📊 Dashboard Bling")
-st.caption("Vendas, pedidos, ticket médio e evolução diária.")
+st.markdown("## 📊 Dashboard Comercial ROPO")
+st.markdown(
+    '<div class="dashboard-subtitle">'
+    "Vendas, performance por canal, metas e projeções."
+    "</div>",
+    unsafe_allow_html=True,
+)
 
 tokens_existentes = ler_tokens()
 
@@ -320,6 +436,18 @@ with st.sidebar:
         )
 
 
+st.markdown(
+    '<div class="dashboard-badges">'
+    f"📅 Período: {data_inicial.strftime('%d/%m/%Y')} a "
+    f"{data_final.strftime('%d/%m/%Y')}"
+    " &nbsp;·&nbsp; 🔄 Última atualização: "
+    f"{datetime.now().strftime('%d/%m/%Y às %H:%M:%S')}"
+    " &nbsp;·&nbsp; 🟢 Bling conectado"
+    "</div>",
+    unsafe_allow_html=True,
+)
+
+
 @st.fragment(run_every="5m")
 def exibir_dashboard() -> None:
     if atualizar:
@@ -365,44 +493,6 @@ def exibir_dashboard() -> None:
     )
 
     with aba_comercial:
-        coluna_1, coluna_2, coluna_3, coluna_4 = st.columns(4)
-
-        coluna_1.metric(
-            "Faturamento",
-            moeda_br(faturamento),
-        )
-
-        coluna_2.metric(
-            "Pedidos",
-            f"{quantidade_pedidos:,}".replace(",", "."),
-        )
-
-        coluna_3.metric(
-            "Ticket médio",
-            moeda_br(ticket_medio),
-        )
-
-        coluna_4.metric(
-            "Cancelados",
-            f"{quantidade_cancelados:,}".replace(",", "."),
-        )
-
-        coluna_c1, coluna_c2 = st.columns(2)
-
-        coluna_c1.metric(
-            "Taxa de cancelamento",
-            f"{taxa_cancelamento:.1%}",
-        )
-
-        coluna_c2.metric(
-            "Valor cancelado",
-            moeda_br(valor_cancelado),
-        )
-
-        st.caption(
-            "Comparações com o período anterior e com o ano anterior"
-        )
-
         duracao_periodo = (data_final - data_inicial).days + 1
 
         periodo_anterior_final = data_inicial - timedelta(days=1)
@@ -435,27 +525,87 @@ def exibir_dashboard() -> None:
             faturamento_valido(df_ano_anterior),
         )
 
+        def _delta_tipo(valor: float | None) -> str:
+            if valor is None:
+                return "neutral"
+            return "good" if valor >= 0 else "bad"
+
+        st.markdown("#### Resumo executivo")
+
+        coluna_1, coluna_2, coluna_3, coluna_4 = st.columns(4)
+
+        with coluna_1:
+            card_kpi(
+                "Faturamento",
+                moeda_br(faturamento),
+                "Período selecionado",
+                delta=(
+                    f"{crescimento_periodo:+.1%} vs. período anterior"
+                    if crescimento_periodo is not None
+                    else None
+                ),
+                delta_tipo=_delta_tipo(crescimento_periodo),
+            )
+
+        with coluna_2:
+            card_kpi(
+                "Pedidos",
+                f"{quantidade_pedidos:,}".replace(",", "."),
+            )
+
+        with coluna_3:
+            card_kpi(
+                "Ticket médio",
+                moeda_br(ticket_medio),
+            )
+
+        with coluna_4:
+            card_kpi(
+                "Cancelados",
+                f"{quantidade_cancelados:,}".replace(",", "."),
+                f"{taxa_cancelamento:.1%} dos pedidos",
+                delta=f"{moeda_br(valor_cancelado)} em valor",
+                delta_tipo="bad" if quantidade_cancelados else "neutral",
+            )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
         coluna_5, coluna_6 = st.columns(2)
 
-        coluna_5.metric(
-            "Vs. período anterior",
-            (
-                f"{crescimento_periodo:+.1%}"
-                if crescimento_periodo is not None
-                else "Sem base de comparação"
-            ),
-        )
+        with coluna_5:
+            card_kpi(
+                "Vs. período anterior",
+                (
+                    f"{crescimento_periodo:+.1%}"
+                    if crescimento_periodo is not None
+                    else "—"
+                ),
+                (
+                    "Sem base de comparação"
+                    if crescimento_periodo is None
+                    else "Mesma duração, imediatamente antes"
+                ),
+                delta_tipo=_delta_tipo(crescimento_periodo),
+            )
 
-        coluna_6.metric(
-            "Vs. mesmo período ano anterior",
-            (
-                f"{crescimento_ano:+.1%}"
-                if crescimento_ano is not None
-                else "Sem base de comparação"
-            ),
-        )
+        with coluna_6:
+            card_kpi(
+                "Vs. mesmo período ano anterior",
+                (
+                    f"{crescimento_ano:+.1%}"
+                    if crescimento_ano is not None
+                    else "—"
+                ),
+                (
+                    "Sem base de comparação"
+                    if crescimento_ano is None
+                    else "Aproximação: 365 dias atrás"
+                ),
+                delta_tipo=_delta_tipo(crescimento_ano),
+            )
 
         st.divider()
+        st.markdown("#### Evolução de vendas")
 
         vendas_diarias = (
             df_validos.dropna(subset=["data"])
@@ -467,50 +617,57 @@ def exibir_dashboard() -> None:
             )
         )
 
-        grafico_faturamento = px.line(
-            vendas_diarias,
-            x="dia",
-            y="faturamento",
-            markers=True,
-            title="Evolução do faturamento",
-            labels={
-                "dia": "Data",
-                "faturamento": "Faturamento",
-            },
-        )
-
-        st.plotly_chart(
-            grafico_faturamento,
-            use_container_width=True,
-        )
-
-        if not vendas_diarias.empty:
-            melhor_dia = vendas_diarias.loc[
-                vendas_diarias["faturamento"].idxmax()
-            ]
-            pior_dia = vendas_diarias.loc[
-                vendas_diarias["faturamento"].idxmin()
-            ]
-            media_diaria = faturamento / vendas_diarias["dia"].nunique()
-
-            coluna_7, coluna_8, coluna_9 = st.columns(3)
-
-            coluna_7.metric(
-                f"Melhor dia ({melhor_dia['dia'].strftime('%d/%m')})",
-                moeda_br(melhor_dia["faturamento"]),
+        with st.container(border=True):
+            grafico_faturamento = px.line(
+                vendas_diarias,
+                x="dia",
+                y="faturamento",
+                markers=True,
+                title="Evolução do faturamento",
+                labels={
+                    "dia": "Data",
+                    "faturamento": "Faturamento",
+                },
             )
 
-            coluna_8.metric(
-                f"Pior dia ({pior_dia['dia'].strftime('%d/%m')})",
-                moeda_br(pior_dia["faturamento"]),
+            st.plotly_chart(
+                grafico_faturamento,
+                use_container_width=True,
             )
 
-            coluna_9.metric(
-                "Média diária",
-                moeda_br(media_diaria),
-            )
+            if not vendas_diarias.empty:
+                melhor_dia = vendas_diarias.loc[
+                    vendas_diarias["faturamento"].idxmax()
+                ]
+                pior_dia = vendas_diarias.loc[
+                    vendas_diarias["faturamento"].idxmin()
+                ]
+                media_diaria = (
+                    faturamento / vendas_diarias["dia"].nunique()
+                )
 
-        st.divider()
+                coluna_7, coluna_8, coluna_9 = st.columns(3)
+
+                with coluna_7:
+                    card_kpi(
+                        f"Melhor dia ({melhor_dia['dia'].strftime('%d/%m')})",
+                        moeda_br(melhor_dia["faturamento"]),
+                    )
+
+                with coluna_8:
+                    card_kpi(
+                        f"Pior dia ({pior_dia['dia'].strftime('%d/%m')})",
+                        moeda_br(pior_dia["faturamento"]),
+                    )
+
+                with coluna_9:
+                    card_kpi(
+                        "Média diária",
+                        moeda_br(media_diaria),
+                    )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("#### Comparativos")
 
         inicio_mes_atual = hoje.replace(day=1)
 
@@ -531,26 +688,29 @@ def exibir_dashboard() -> None:
 
         coluna_10, coluna_11 = st.columns(2)
 
-        coluna_10.metric(
-            "Acumulado do mês",
-            moeda_br(faturamento_mes_atual),
-        )
+        with coluna_10:
+            card_kpi(
+                "Acumulado do mês",
+                moeda_br(faturamento_mes_atual),
+            )
 
-        coluna_11.metric(
-            "Projeção de fechamento do mês",
-            moeda_br(projecao_mes),
-        )
+        with coluna_11:
+            card_kpi(
+                "Projeção de fechamento do mês",
+                moeda_br(projecao_mes),
+                "Acumulado ÷ dias transcorridos × dias do mês",
+            )
 
         st.caption(
-            "Projeção simples (acumulado ÷ dias transcorridos × dias do "
-            "mês). Não considera sazonalidade nem campanhas."
+            "Projeção simples. Não considera sazonalidade nem campanhas."
         )
 
         st.divider()
+        st.markdown("#### Operação")
 
         coluna_status, coluna_clientes = st.columns(2)
 
-        with coluna_status:
+        with coluna_status, st.container(border=True):
             por_situacao = (
                 df.groupby("situacao", as_index=False)
                 .agg(pedidos=("id", "nunique"))
@@ -573,7 +733,7 @@ def exibir_dashboard() -> None:
                 use_container_width=True,
             )
 
-        with coluna_clientes:
+        with coluna_clientes, st.container(border=True):
             principais_clientes = (
                 df_validos.groupby("cliente", as_index=False)
                 .agg(
@@ -601,7 +761,8 @@ def exibir_dashboard() -> None:
                 use_container_width=True,
             )
 
-        st.subheader("Canais")
+        st.divider()
+        st.markdown("#### Canais")
 
         receita_por_canal = (
             df_validos.assign(
@@ -657,104 +818,107 @@ def exibir_dashboard() -> None:
             axis=1,
         )
 
-        coluna_canal, coluna_cancelamento_canal = st.columns(2)
+        with st.container(border=True):
+            coluna_canal, coluna_cancelamento_canal = st.columns(2)
 
-        with coluna_canal:
-            grafico_canal = px.bar(
-                receita_por_canal,
-                x="canal",
-                y="faturamento",
-                title="Receita por canal",
-                labels={
-                    "canal": "Canal",
-                    "faturamento": "Faturamento",
-                },
-            )
-
-            st.plotly_chart(
-                grafico_canal,
-                use_container_width=True,
-            )
-
-        with coluna_cancelamento_canal:
-            cancelamento_por_canal = (
-                df.assign(
-                    canal=lambda d: d["loja_id"].apply(nome_canal),
-                    cancelado=cancelados,
+            with coluna_canal:
+                grafico_canal = px.bar(
+                    receita_por_canal,
+                    x="canal",
+                    y="faturamento",
+                    title="Receita por canal",
+                    labels={
+                        "canal": "Canal",
+                        "faturamento": "Faturamento",
+                    },
                 )
-                .groupby("canal", as_index=False)
-                .agg(
-                    total_pedidos=("id", "nunique"),
-                    cancelados=("cancelado", "sum"),
+
+                st.plotly_chart(
+                    grafico_canal,
+                    use_container_width=True,
+                )
+
+            with coluna_cancelamento_canal:
+                cancelamento_por_canal = (
+                    df.assign(
+                        canal=lambda d: d["loja_id"].apply(nome_canal),
+                        cancelado=cancelados,
+                    )
+                    .groupby("canal", as_index=False)
+                    .agg(
+                        total_pedidos=("id", "nunique"),
+                        cancelados=("cancelado", "sum"),
+                    )
+                )
+
+                cancelamento_por_canal["taxa_cancelamento"] = (
+                    cancelamento_por_canal["cancelados"]
+                    / cancelamento_por_canal["total_pedidos"]
+                )
+
+                grafico_cancelamento = px.bar(
+                    cancelamento_por_canal,
+                    x="canal",
+                    y="taxa_cancelamento",
+                    title="Taxa de cancelamento por canal",
+                    labels={
+                        "canal": "Canal",
+                        "taxa_cancelamento": "Taxa de cancelamento",
+                    },
+                )
+
+                grafico_cancelamento.update_yaxes(tickformat=".0%")
+
+                st.plotly_chart(
+                    grafico_cancelamento,
+                    use_container_width=True,
+                )
+
+            tabela_canal = receita_por_canal.copy()
+
+            tabela_canal["faturamento"] = tabela_canal[
+                "faturamento"
+            ].apply(moeda_br)
+            tabela_canal["ticket_medio"] = tabela_canal[
+                "ticket_medio"
+            ].apply(moeda_br)
+            tabela_canal["participacao"] = tabela_canal[
+                "participacao"
+            ].apply(lambda valor: f"{valor:.1%}")
+            tabela_canal["crescimento"] = tabela_canal["crescimento"].apply(
+                lambda valor: (
+                    f"{valor:+.1%}"
+                    if pd.notna(valor)
+                    else "Sem base anterior"
                 )
             )
 
-            cancelamento_por_canal["taxa_cancelamento"] = (
-                cancelamento_por_canal["cancelados"]
-                / cancelamento_por_canal["total_pedidos"]
-            )
-
-            grafico_cancelamento = px.bar(
-                cancelamento_por_canal,
-                x="canal",
-                y="taxa_cancelamento",
-                title="Taxa de cancelamento por canal",
-                labels={
-                    "canal": "Canal",
-                    "taxa_cancelamento": "Taxa de cancelamento",
-                },
-            )
-
-            grafico_cancelamento.update_yaxes(tickformat=".0%")
-
-            st.plotly_chart(
-                grafico_cancelamento,
+            st.dataframe(
+                tabela_canal[
+                    [
+                        "canal",
+                        "faturamento",
+                        "pedidos",
+                        "ticket_medio",
+                        "participacao",
+                        "crescimento",
+                    ]
+                ].rename(
+                    columns={
+                        "canal": "Canal",
+                        "faturamento": "Faturamento",
+                        "pedidos": "Pedidos",
+                        "ticket_medio": "Ticket médio",
+                        "participacao": "Participação",
+                        "crescimento": "Vs. período anterior",
+                    }
+                ),
                 use_container_width=True,
+                hide_index=True,
             )
-
-        tabela_canal = receita_por_canal.copy()
-
-        tabela_canal["faturamento"] = tabela_canal["faturamento"].apply(
-            moeda_br
-        )
-        tabela_canal["ticket_medio"] = tabela_canal["ticket_medio"].apply(
-            moeda_br
-        )
-        tabela_canal["participacao"] = tabela_canal["participacao"].apply(
-            lambda valor: f"{valor:.1%}"
-        )
-        tabela_canal["crescimento"] = tabela_canal["crescimento"].apply(
-            lambda valor: (
-                f"{valor:+.1%}" if pd.notna(valor) else "Sem base anterior"
-            )
-        )
-
-        st.dataframe(
-            tabela_canal[
-                [
-                    "canal",
-                    "faturamento",
-                    "pedidos",
-                    "ticket_medio",
-                    "participacao",
-                    "crescimento",
-                ]
-            ].rename(
-                columns={
-                    "canal": "Canal",
-                    "faturamento": "Faturamento",
-                    "pedidos": "Pedidos",
-                    "ticket_medio": "Ticket médio",
-                    "participacao": "Participação",
-                    "crescimento": "Vs. período anterior",
-                }
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
 
         st.divider()
-        st.subheader("Dia da semana")
+        st.markdown("#### Dia da semana")
 
         dados_semana = df.dropna(subset=["data"]).copy()
         dados_semana["dia_semana_idx"] = dados_semana["data"].dt.dayofweek
@@ -795,24 +959,26 @@ def exibir_dashboard() -> None:
 
         por_dia_semana = por_dia_semana.sort_values("dia_semana_idx")
 
-        grafico_dia_semana = px.bar(
-            por_dia_semana,
-            x="dia_semana",
-            y="faturamento",
-            title="Faturamento por dia da semana",
-            labels={
-                "dia_semana": "Dia da semana",
-                "faturamento": "Faturamento",
-            },
-        )
+        with st.container(border=True):
+            grafico_dia_semana = px.bar(
+                por_dia_semana,
+                x="dia_semana",
+                y="faturamento",
+                title="Faturamento por dia da semana",
+                labels={
+                    "dia_semana": "Dia da semana",
+                    "faturamento": "Faturamento",
+                },
+            )
 
-        st.plotly_chart(
-            grafico_dia_semana,
-            use_container_width=True,
-        )
+            st.plotly_chart(
+                grafico_dia_semana,
+                use_container_width=True,
+            )
 
         st.divider()
-        st.subheader("Clientes novos vs. recorrentes")
+        st.markdown("#### Clientes")
+        st.caption("Novos vs. recorrentes")
 
         historico_completo = carregar_historico_completo(
             data_final.isoformat(),
@@ -892,72 +1058,74 @@ def exibir_dashboard() -> None:
                 ticket_recorrentes,
             ) = _linha_status(False)
 
-            coluna_novo, coluna_recorrente = st.columns(2)
+            with st.container(border=True):
+                coluna_novo, coluna_recorrente = st.columns(2)
 
-            with coluna_novo:
-                st.markdown("**Clientes novos**")
-                st.metric("Clientes", clientes_novos)
-                st.metric("Receita", moeda_br(receita_novos))
-                st.metric("Ticket médio", moeda_br(ticket_novos))
+                with coluna_novo:
+                    st.markdown("**Clientes novos**")
+                    card_kpi("Clientes", str(clientes_novos))
+                    card_kpi("Receita", moeda_br(receita_novos))
+                    card_kpi("Ticket médio", moeda_br(ticket_novos))
 
-            with coluna_recorrente:
-                st.markdown("**Clientes recorrentes**")
-                st.metric("Clientes", clientes_recorrentes)
-                st.metric("Receita", moeda_br(receita_recorrentes))
-                st.metric("Ticket médio", moeda_br(ticket_recorrentes))
+                with coluna_recorrente:
+                    st.markdown("**Clientes recorrentes**")
+                    card_kpi("Clientes", str(clientes_recorrentes))
+                    card_kpi("Receita", moeda_br(receita_recorrentes))
+                    card_kpi("Ticket médio", moeda_br(ticket_recorrentes))
 
-            clientes_2_ou_mais = int(
-                (pedidos_por_cliente_historico >= 2).sum()
-            )
-            clientes_3_ou_mais = int(
-                (pedidos_por_cliente_historico >= 3).sum()
-            )
-            total_clientes_historico = int(
-                pedidos_por_cliente_historico.shape[0]
-            )
+                clientes_2_ou_mais = int(
+                    (pedidos_por_cliente_historico >= 2).sum()
+                )
+                clientes_3_ou_mais = int(
+                    (pedidos_por_cliente_historico >= 3).sum()
+                )
+                total_clientes_historico = int(
+                    pedidos_por_cliente_historico.shape[0]
+                )
 
-            taxa_recompra = (
-                clientes_2_ou_mais / total_clientes_historico
-                if total_clientes_historico
-                else 0
+                taxa_recompra = (
+                    clientes_2_ou_mais / total_clientes_historico
+                    if total_clientes_historico
+                    else 0
+                )
+
+                st.caption(
+                    f"Taxa de recompra (últimos 3 anos): "
+                    f"{taxa_recompra:.1%} — {clientes_2_ou_mais} com 2+ "
+                    f"pedidos e {clientes_3_ou_mais} com 3+ pedidos, de "
+                    f"{total_clientes_historico} clientes únicos."
+                )
+
+        st.divider()
+        st.markdown("#### Pedidos do período")
+
+        with st.container(border=True):
+            tabela = df.sort_values(
+                "data",
+                ascending=False,
+            ).copy()
+
+            tabela["data"] = tabela["data"].dt.strftime("%d/%m/%Y")
+            tabela["total"] = tabela["total"].apply(moeda_br)
+
+            st.dataframe(
+                tabela[
+                    [
+                        "numero",
+                        "data",
+                        "cliente",
+                        "situacao",
+                        "total",
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
             )
 
             st.caption(
-                f"Taxa de recompra (últimos 3 anos): {taxa_recompra:.1%} "
-                f"— {clientes_2_ou_mais} com 2+ pedidos e "
-                f"{clientes_3_ou_mais} com 3+ pedidos, de "
-                f"{total_clientes_historico} clientes únicos."
+                "Última atualização exibida: "
+                f"{datetime.now().strftime('%d/%m/%Y às %H:%M:%S')}"
             )
-
-        st.divider()
-        st.subheader("Pedidos do período")
-
-        tabela = df.sort_values(
-            "data",
-            ascending=False,
-        ).copy()
-
-        tabela["data"] = tabela["data"].dt.strftime("%d/%m/%Y")
-        tabela["total"] = tabela["total"].apply(moeda_br)
-
-        st.dataframe(
-            tabela[
-                [
-                    "numero",
-                    "data",
-                    "cliente",
-                    "situacao",
-                    "total",
-                ]
-            ],
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        st.caption(
-            "Última atualização exibida: "
-            f"{datetime.now().strftime('%d/%m/%Y às %H:%M:%S')}"
-        )
 
     with aba_produto:
         st.info(
@@ -1051,33 +1219,34 @@ def exibir_dashboard() -> None:
                     )
                 )
 
-                st.dataframe(
-                    tabela_comparativo.rename(
-                        columns={
-                            "canal": "Canal",
-                            "referencia": "Início do período",
-                            "realizado": "Realizado",
-                            "meta": "Meta",
-                            "gap": "Gap",
-                            "atingido": "Atingido",
-                            "ritmo_necessario": "Ritmo necessário",
-                            "classificacao": "Situação",
-                        }
-                    )[
-                        [
-                            "Canal",
-                            "Início do período",
-                            "Realizado",
-                            "Meta",
-                            "Gap",
-                            "Atingido",
-                            "Ritmo necessário",
-                            "Situação",
-                        ]
-                    ],
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                with st.container(border=True):
+                    st.dataframe(
+                        tabela_comparativo.rename(
+                            columns={
+                                "canal": "Canal",
+                                "referencia": "Início do período",
+                                "realizado": "Realizado",
+                                "meta": "Meta",
+                                "gap": "Gap",
+                                "atingido": "Atingido",
+                                "ritmo_necessario": "Ritmo necessário",
+                                "classificacao": "Situação",
+                            }
+                        )[
+                            [
+                                "Canal",
+                                "Início do período",
+                                "Realizado",
+                                "Meta",
+                                "Gap",
+                                "Atingido",
+                                "Ritmo necessário",
+                                "Situação",
+                            ]
+                        ],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
         with st.expander("Cadastrar ou atualizar meta"):
             with st.form("form_meta"):
