@@ -757,3 +757,199 @@ def ler_itens_pedidos(
     itens["data"] = pd.to_datetime(itens["data"]).dt.date
 
     return itens[colunas]
+
+
+# =========================================================
+# METAS DE VENDAS
+# =========================================================
+
+def ler_metas() -> pd.DataFrame:
+    resposta = supabase.table("metas").select("*").execute()
+    dados = resposta.data or []
+
+    colunas = [
+        "id",
+        "canal",
+        "referencia_inicio",
+        "referencia_fim",
+        "valor",
+        "rotulo",
+    ]
+
+    if not dados:
+        return pd.DataFrame(columns=colunas)
+
+    metas = pd.DataFrame(dados)
+    metas["referencia_inicio"] = pd.to_datetime(
+        metas["referencia_inicio"]
+    ).dt.date
+    metas["referencia_fim"] = pd.to_datetime(metas["referencia_fim"]).dt.date
+    metas["rotulo"] = metas["rotulo"].fillna("")
+
+    return metas[colunas]
+
+
+def salvar_meta(
+    canal: str,
+    referencia_inicio: date,
+    referencia_fim: date,
+    valor: float,
+    rotulo: str = "",
+) -> None:
+    registro = {
+        "canal": canal,
+        "referencia_inicio": referencia_inicio.isoformat(),
+        "referencia_fim": referencia_fim.isoformat(),
+        "valor": valor,
+        "rotulo": rotulo or None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    (
+        supabase.table("metas")
+        .upsert(
+            registro,
+            on_conflict="canal,referencia_inicio,referencia_fim",
+        )
+        .execute()
+    )
+
+
+def excluir_meta(meta_id: int) -> None:
+    supabase.table("metas").delete().eq("id", meta_id).execute()
+
+
+def calcular_realizado_meta(
+    historico: pd.DataFrame,
+    canal: str,
+    referencia_inicio: date,
+    referencia_fim: date,
+) -> float:
+    if historico.empty:
+        return 0.0
+
+    lojas = canais_do_grupo(canal)
+
+    filtro = (
+        historico["canal"].isin(lojas)
+        & (historico["data"] >= referencia_inicio)
+        & (historico["data"] <= referencia_fim)
+    )
+
+    return float(historico.loc[filtro, "faturamento_valido"].sum())
+
+
+def montar_comparativo(
+    metas: pd.DataFrame,
+    historico: pd.DataFrame,
+    hoje: date,
+) -> pd.DataFrame:
+    colunas = [
+        "id",
+        "canal",
+        "rotulo",
+        "referencia_inicio",
+        "referencia_fim",
+        "realizado",
+        "meta",
+        "meta_diaria",
+        "gap",
+        "atingido",
+        "ritmo_necessario",
+        "projecao",
+        "classificacao",
+        "periodo_ativo_agora",
+    ]
+
+    if metas.empty:
+        return pd.DataFrame(columns=colunas)
+
+    linhas = []
+
+    for _, linha_meta in metas.iterrows():
+        referencia_inicio = linha_meta["referencia_inicio"]
+        referencia_fim = linha_meta["referencia_fim"]
+        valor_meta = float(linha_meta["valor"])
+
+        realizado = calcular_realizado_meta(
+            historico,
+            linha_meta["canal"],
+            referencia_inicio,
+            referencia_fim,
+        )
+
+        dias_totais = (referencia_fim - referencia_inicio).days + 1
+        periodo_em_andamento = referencia_fim >= hoje
+        periodo_ativo_agora = referencia_inicio <= hoje <= referencia_fim
+
+        fim_considerado = min(hoje, referencia_fim)
+        dias_transcorridos = (
+            (fim_considerado - referencia_inicio).days + 1
+            if fim_considerado >= referencia_inicio
+            else 0
+        )
+
+        dias_restantes = max(dias_totais - dias_transcorridos, 0)
+
+        gap = realizado - valor_meta if valor_meta > 0 else None
+        atingido = realizado / valor_meta if valor_meta > 0 else None
+
+        meta_restante = max(valor_meta - realizado, 0)
+
+        ritmo_necessario = (
+            meta_restante / dias_restantes
+            if valor_meta > 0
+            and periodo_em_andamento
+            and dias_restantes > 0
+            else None
+        )
+
+        projecao = (
+            realizado / dias_transcorridos * dias_totais
+            if periodo_em_andamento and dias_transcorridos > 0
+            else None
+        )
+
+        if valor_meta <= 0:
+            classificacao = "Sem meta"
+        elif not periodo_em_andamento:
+            classificacao = "Período encerrado"
+        elif projecao is None:
+            classificacao = "—"
+        else:
+            razao = projecao / valor_meta
+
+            if razao >= 1:
+                classificacao = "Acima da meta"
+            elif razao >= 0.9:
+                classificacao = "Dentro do ritmo"
+            elif razao >= 0.7:
+                classificacao = "Risco moderado"
+            else:
+                classificacao = "Risco alto"
+
+        linhas.append(
+            {
+                "id": linha_meta["id"],
+                "canal": linha_meta["canal"],
+                "rotulo": linha_meta.get("rotulo") or "",
+                "referencia_inicio": referencia_inicio,
+                "referencia_fim": referencia_fim,
+                "realizado": realizado,
+                "meta": valor_meta,
+                "meta_diaria": (
+                    valor_meta / dias_totais if dias_totais else 0
+                ),
+                "gap": gap,
+                "atingido": atingido,
+                "ritmo_necessario": ritmo_necessario,
+                "projecao": projecao,
+                "classificacao": classificacao,
+                "periodo_ativo_agora": periodo_ativo_agora,
+            }
+        )
+
+    return pd.DataFrame(linhas, columns=colunas).sort_values(
+        ["referencia_inicio", "canal"],
+        ascending=[True, True],
+    )

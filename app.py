@@ -11,19 +11,33 @@ from bling_core import (
     GRUPOS_CANAL,
     SITUACOES_CANCELADAS,
     calcular_historico_diario,
-    canais_do_grupo,
     carregar_dataframe,
     carregar_historico_completo,
+    excluir_meta,
     gerar_url_autorizacao,
     ler_historico_diario,
     ler_itens_pedidos,
+    ler_metas,
     ler_tokens,
     moeda_br,
+    montar_comparativo,
     nome_canal,
     processar_callback_oauth,
     salvar_historico_diario,
+    salvar_meta,
     sincronizar_itens_pedidos,
-    supabase,
+)
+from ui import (
+    ALTURA_GRAFICO_PRINCIPAL,
+    CORES,
+    aplicar_padrao_grafico,
+    badges_dashboard,
+    cabecalho_dashboard,
+    cabecalho_secao,
+    card_insight,
+    card_kpi,
+    card_meta,
+    injetar_css,
 )
 
 NOMES_DIA_SEMANA = {
@@ -46,311 +60,10 @@ st.set_page_config(
     layout="wide",
 )
 
-st.markdown(
-    """
-    <style>
-    .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-        max-width: 1400px;
-    }
-
-    h1, h2, h3 {
-        color: #0F172A;
-    }
-
-    .dashboard-subtitle {
-        color: #64748B;
-        font-size: 0.95rem;
-        margin-top: -8px;
-        margin-bottom: 4px;
-    }
-
-    .dashboard-badges {
-        color: #64748B;
-        font-size: 0.85rem;
-        margin-bottom: 20px;
-    }
-
-    .kpi-card {
-        background: white;
-        border: 1px solid #E2E8F0;
-        border-radius: 18px;
-        padding: 16px 18px;
-        box-shadow: 0 4px 14px rgba(15, 23, 42, 0.05);
-        height: 100%;
-    }
-
-    .small-label {
-        font-size: 0.8rem;
-        color: #64748B;
-        margin-bottom: 6px;
-    }
-
-    .big-number {
-        font-size: 1.7rem;
-        font-weight: 700;
-        color: #0F172A;
-        line-height: 1.2;
-    }
-
-    .delta {
-        font-size: 0.8rem;
-        font-weight: 600;
-        margin-top: 4px;
-    }
-
-    .delta.good {
-        color: #16A34A;
-    }
-
-    .delta.bad {
-        color: #DC2626;
-    }
-
-    .delta.neutral {
-        color: #64748B;
-    }
-
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-    }
-
-    .stTabs [data-baseweb="tab"] {
-        background: #EFF6FF;
-        border-radius: 12px;
-        padding: 10px 16px;
-        height: auto;
-    }
-
-    .stTabs [aria-selected="true"] {
-        background: #2563EB !important;
-        color: white !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-def card_kpi(
-    titulo: str,
-    valor: str,
-    subtitulo: str = "",
-    delta: str | None = None,
-    delta_tipo: str = "neutral",
-) -> None:
-    delta_html = (
-        f'<div class="delta {delta_tipo}">{delta}</div>' if delta else ""
-    )
-
-    st.markdown(
-        f"""
-        <div class="kpi-card">
-            <div class="small-label">{titulo}</div>
-            <div class="big-number">{valor}</div>
-            <div class="small-label">{subtitulo}</div>
-            {delta_html}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+injetar_css()
 
 
 processar_callback_oauth()
-
-
-# =========================================================
-# METAS DE VENDAS
-# =========================================================
-
-def ler_metas() -> pd.DataFrame:
-    resposta = supabase.table("metas").select("*").execute()
-    dados = resposta.data or []
-
-    colunas = [
-        "id",
-        "canal",
-        "referencia_inicio",
-        "referencia_fim",
-        "valor",
-        "rotulo",
-    ]
-
-    if not dados:
-        return pd.DataFrame(columns=colunas)
-
-    metas = pd.DataFrame(dados)
-    metas["referencia_inicio"] = pd.to_datetime(
-        metas["referencia_inicio"]
-    ).dt.date
-    metas["referencia_fim"] = pd.to_datetime(metas["referencia_fim"]).dt.date
-    metas["rotulo"] = metas["rotulo"].fillna("")
-
-    return metas[colunas]
-
-
-def salvar_meta(
-    canal: str,
-    referencia_inicio: date,
-    referencia_fim: date,
-    valor: float,
-    rotulo: str = "",
-) -> None:
-    registro = {
-        "canal": canal,
-        "referencia_inicio": referencia_inicio.isoformat(),
-        "referencia_fim": referencia_fim.isoformat(),
-        "valor": valor,
-        "rotulo": rotulo or None,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-    (
-        supabase.table("metas")
-        .upsert(
-            registro,
-            on_conflict="canal,referencia_inicio,referencia_fim",
-        )
-        .execute()
-    )
-
-
-def excluir_meta(meta_id: int) -> None:
-    supabase.table("metas").delete().eq("id", meta_id).execute()
-
-
-def calcular_realizado_meta(
-    historico: pd.DataFrame,
-    canal: str,
-    referencia_inicio: date,
-    referencia_fim: date,
-) -> float:
-    if historico.empty:
-        return 0.0
-
-    lojas = canais_do_grupo(canal)
-
-    filtro = (
-        historico["canal"].isin(lojas)
-        & (historico["data"] >= referencia_inicio)
-        & (historico["data"] <= referencia_fim)
-    )
-
-    return float(historico.loc[filtro, "faturamento_valido"].sum())
-
-
-def montar_comparativo(
-    metas: pd.DataFrame,
-    historico: pd.DataFrame,
-    hoje: date,
-) -> pd.DataFrame:
-    colunas = [
-        "id",
-        "canal",
-        "rotulo",
-        "referencia_inicio",
-        "referencia_fim",
-        "realizado",
-        "meta",
-        "meta_diaria",
-        "gap",
-        "atingido",
-        "ritmo_necessario",
-        "projecao",
-        "classificacao",
-    ]
-
-    if metas.empty:
-        return pd.DataFrame(columns=colunas)
-
-    linhas = []
-
-    for _, linha_meta in metas.iterrows():
-        referencia_inicio = linha_meta["referencia_inicio"]
-        referencia_fim = linha_meta["referencia_fim"]
-        valor_meta = float(linha_meta["valor"])
-
-        realizado = calcular_realizado_meta(
-            historico,
-            linha_meta["canal"],
-            referencia_inicio,
-            referencia_fim,
-        )
-
-        dias_totais = (referencia_fim - referencia_inicio).days + 1
-        periodo_em_andamento = referencia_fim >= hoje
-
-        fim_considerado = min(hoje, referencia_fim)
-        dias_transcorridos = (
-            (fim_considerado - referencia_inicio).days + 1
-            if fim_considerado >= referencia_inicio
-            else 0
-        )
-
-        dias_restantes = max(dias_totais - dias_transcorridos, 0)
-
-        gap = realizado - valor_meta if valor_meta > 0 else None
-        atingido = realizado / valor_meta if valor_meta > 0 else None
-
-        meta_restante = max(valor_meta - realizado, 0)
-
-        ritmo_necessario = (
-            meta_restante / dias_restantes
-            if valor_meta > 0
-            and periodo_em_andamento
-            and dias_restantes > 0
-            else None
-        )
-
-        projecao = (
-            realizado / dias_transcorridos * dias_totais
-            if periodo_em_andamento and dias_transcorridos > 0
-            else None
-        )
-
-        if valor_meta <= 0:
-            classificacao = "Sem meta"
-        elif not periodo_em_andamento:
-            classificacao = "Período encerrado"
-        elif projecao is None:
-            classificacao = "—"
-        else:
-            razao = projecao / valor_meta
-
-            if razao >= 1:
-                classificacao = "Acima da meta"
-            elif razao >= 0.9:
-                classificacao = "Dentro do ritmo"
-            elif razao >= 0.7:
-                classificacao = "Risco moderado"
-            else:
-                classificacao = "Risco alto"
-
-        linhas.append(
-            {
-                "id": linha_meta["id"],
-                "canal": linha_meta["canal"],
-                "rotulo": linha_meta.get("rotulo") or "",
-                "referencia_inicio": referencia_inicio,
-                "referencia_fim": referencia_fim,
-                "realizado": realizado,
-                "meta": valor_meta,
-                "meta_diaria": (
-                    valor_meta / dias_totais if dias_totais else 0
-                ),
-                "gap": gap,
-                "atingido": atingido,
-                "ritmo_necessario": ritmo_necessario,
-                "projecao": projecao,
-                "classificacao": classificacao,
-            }
-        )
-
-    return pd.DataFrame(linhas, columns=colunas).sort_values(
-        ["referencia_inicio", "canal"],
-        ascending=[True, True],
-    )
 
 
 # =========================================================
@@ -377,12 +90,9 @@ def variacao_percentual(atual: float, anterior: float) -> float | None:
 # INTERFACE
 # =========================================================
 
-st.markdown("## 📊 Dashboard Comercial ROPO")
-st.markdown(
-    '<div class="dashboard-subtitle">'
-    "Vendas, performance por canal, metas e projeções."
-    "</div>",
-    unsafe_allow_html=True,
+cabecalho_dashboard(
+    "📊 Dashboard Comercial ROPO",
+    "Acompanhamento de vendas, canais, produtos, metas e projeções.",
 )
 
 tokens_existentes = ler_tokens()
@@ -436,15 +146,14 @@ with st.sidebar:
         )
 
 
-st.markdown(
-    '<div class="dashboard-badges">'
-    f"📅 Período: {data_inicial.strftime('%d/%m/%Y')} a "
-    f"{data_final.strftime('%d/%m/%Y')}"
-    " &nbsp;·&nbsp; 🔄 Última atualização: "
-    f"{datetime.now().strftime('%d/%m/%Y às %H:%M:%S')}"
-    " &nbsp;·&nbsp; 🟢 Bling conectado"
-    "</div>",
-    unsafe_allow_html=True,
+badges_dashboard(
+    [
+        f"📅 {data_inicial.strftime('%d/%m/%Y')} a "
+        f"{data_final.strftime('%d/%m/%Y')}",
+        "🔄 Atualizado em "
+        f"{datetime.now().strftime('%d/%m/%Y às %H:%M')}",
+        "🟢 Bling conectado",
+    ]
 )
 
 
@@ -488,11 +197,48 @@ def exibir_dashboard() -> None:
         else 0
     )
 
+    metas_df = ler_metas()
+    historico_metas = ler_historico_diario()
+    comparativo = montar_comparativo(metas_df, historico_metas, hoje)
+
     aba_comercial, aba_produto, aba_preditivo, aba_metas = st.tabs(
         ["📈 Comercial", "🛒 Produto", "🔮 Preditivo", "🎯 Metas"]
     )
 
     with aba_comercial:
+        if not comparativo.empty:
+            metas_ativas = comparativo.loc[
+                comparativo["periodo_ativo_agora"]
+            ]
+
+            if not metas_ativas.empty:
+                cabecalho_secao(
+                    "Pacing das metas ativas",
+                    "O que está em andamento agora, antes de qualquer "
+                    "outro número.",
+                    "🎯",
+                )
+
+                colunas_pacing = st.columns(len(metas_ativas))
+
+                for coluna_pacing, (_, linha_meta) in zip(
+                    colunas_pacing, metas_ativas.iterrows()
+                ):
+                    with coluna_pacing:
+                        card_meta(
+                            linha_meta["rotulo"]
+                            or nome_canal(linha_meta["canal"]),
+                            linha_meta["realizado"],
+                            linha_meta["meta"],
+                            linha_meta["classificacao"],
+                            subtitulo=(
+                                f"até "
+                                f"{linha_meta['referencia_fim'].strftime('%d/%m')}"
+                            ),
+                        )
+
+                st.markdown("<br>", unsafe_allow_html=True)
+
         duracao_periodo = (data_final - data_inicial).days + 1
 
         periodo_anterior_final = data_inicial - timedelta(days=1)
@@ -530,7 +276,12 @@ def exibir_dashboard() -> None:
                 return "neutral"
             return "good" if valor >= 0 else "bad"
 
-        st.markdown("#### Resumo executivo")
+        cabecalho_secao(
+            "Resumo executivo",
+            "Faturamento, pedidos, ticket médio e cancelamento do "
+            "período selecionado.",
+            "📊",
+        )
 
         coluna_1, coluna_2, coluna_3, coluna_4 = st.columns(4)
 
@@ -604,8 +355,11 @@ def exibir_dashboard() -> None:
                 delta_tipo=_delta_tipo(crescimento_ano),
             )
 
-        st.divider()
-        st.markdown("#### Evolução de vendas")
+        cabecalho_secao(
+            "Evolução de vendas",
+            "Comportamento diário do faturamento no período selecionado.",
+            "📈",
+        )
 
         vendas_diarias = (
             df_validos.dropna(subset=["data"])
@@ -624,15 +378,29 @@ def exibir_dashboard() -> None:
                 y="faturamento",
                 markers=True,
                 title="Evolução do faturamento",
-                labels={
-                    "dia": "Data",
-                    "faturamento": "Faturamento",
-                },
+                color_discrete_sequence=[CORES["primaria"]],
+                labels={"dia": "", "faturamento": ""},
+            )
+
+            grafico_faturamento.update_traces(
+                line={"width": 3},
+                marker={"size": 7, "line": {"width": 2, "color": "white"}},
+                hovertemplate=(
+                    "<b>%{x|%d/%m/%Y}</b><br>"
+                    "Faturamento: R$ %{y:,.2f}<extra></extra>"
+                ),
+            )
+
+            aplicar_padrao_grafico(
+                grafico_faturamento,
+                altura=ALTURA_GRAFICO_PRINCIPAL,
+                moeda_eixo_y=True,
             )
 
             st.plotly_chart(
                 grafico_faturamento,
                 use_container_width=True,
+                config={"displayModeBar": False},
             )
 
             if not vendas_diarias.empty:
@@ -666,8 +434,11 @@ def exibir_dashboard() -> None:
                         moeda_br(media_diaria),
                     )
 
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown("#### Comparativos")
+        cabecalho_secao(
+            "Comparativos",
+            "Acumulado do mês e projeção simples de fechamento.",
+            "🧮",
+        )
 
         inicio_mes_atual = hoje.replace(day=1)
 
@@ -705,8 +476,11 @@ def exibir_dashboard() -> None:
             "Projeção simples. Não considera sazonalidade nem campanhas."
         )
 
-        st.divider()
-        st.markdown("#### Operação")
+        cabecalho_secao(
+            "Operação",
+            "Pedidos por situação e principais clientes do período.",
+            "⚙️",
+        )
 
         coluna_status, coluna_clientes = st.columns(2)
 
@@ -722,15 +496,16 @@ def exibir_dashboard() -> None:
                 x="situacao",
                 y="pedidos",
                 title="Pedidos por situação",
-                labels={
-                    "situacao": "Situação",
-                    "pedidos": "Pedidos",
-                },
+                color_discrete_sequence=[CORES["primaria"]],
+                labels={"situacao": "", "pedidos": ""},
             )
+
+            aplicar_padrao_grafico(grafico_status)
 
             st.plotly_chart(
                 grafico_status,
                 use_container_width=True,
+                config={"displayModeBar": False},
             )
 
         with coluna_clientes, st.container(border=True):
@@ -750,19 +525,23 @@ def exibir_dashboard() -> None:
                 y="cliente",
                 orientation="h",
                 title="Principais clientes",
-                labels={
-                    "cliente": "Cliente",
-                    "faturamento": "Faturamento",
-                },
+                color_discrete_sequence=[CORES["secundaria"]],
+                labels={"cliente": "", "faturamento": ""},
             )
+
+            aplicar_padrao_grafico(grafico_clientes, moeda_eixo_x=True)
 
             st.plotly_chart(
                 grafico_clientes,
                 use_container_width=True,
+                config={"displayModeBar": False},
             )
 
-        st.divider()
-        st.markdown("#### Canais")
+        cabecalho_secao(
+            "Canais",
+            "Receita, ticket médio, participação e cancelamento por canal.",
+            "🛰️",
+        )
 
         receita_por_canal = (
             df_validos.assign(
@@ -827,15 +606,16 @@ def exibir_dashboard() -> None:
                     x="canal",
                     y="faturamento",
                     title="Receita por canal",
-                    labels={
-                        "canal": "Canal",
-                        "faturamento": "Faturamento",
-                    },
+                    color_discrete_sequence=[CORES["primaria"]],
+                    labels={"canal": "", "faturamento": ""},
                 )
+
+                aplicar_padrao_grafico(grafico_canal, moeda_eixo_y=True)
 
                 st.plotly_chart(
                     grafico_canal,
                     use_container_width=True,
+                    config={"displayModeBar": False},
                 )
 
             with coluna_cancelamento_canal:
@@ -861,17 +641,19 @@ def exibir_dashboard() -> None:
                     x="canal",
                     y="taxa_cancelamento",
                     title="Taxa de cancelamento por canal",
-                    labels={
-                        "canal": "Canal",
-                        "taxa_cancelamento": "Taxa de cancelamento",
-                    },
+                    color_discrete_sequence=[CORES["erro"]],
+                    labels={"canal": "", "taxa_cancelamento": ""},
                 )
 
-                grafico_cancelamento.update_yaxes(tickformat=".0%")
+                aplicar_padrao_grafico(
+                    grafico_cancelamento,
+                    percentual_eixo_y=True,
+                )
 
                 st.plotly_chart(
                     grafico_cancelamento,
                     use_container_width=True,
+                    config={"displayModeBar": False},
                 )
 
             tabela_canal = receita_por_canal.copy()
@@ -917,8 +699,11 @@ def exibir_dashboard() -> None:
                 hide_index=True,
             )
 
-        st.divider()
-        st.markdown("#### Dia da semana")
+        cabecalho_secao(
+            "Dia da semana",
+            "Faturamento e cancelamento por dia da semana.",
+            "📅",
+        )
 
         dados_semana = df.dropna(subset=["data"]).copy()
         dados_semana["dia_semana_idx"] = dados_semana["data"].dt.dayofweek
@@ -965,20 +750,23 @@ def exibir_dashboard() -> None:
                 x="dia_semana",
                 y="faturamento",
                 title="Faturamento por dia da semana",
-                labels={
-                    "dia_semana": "Dia da semana",
-                    "faturamento": "Faturamento",
-                },
+                color_discrete_sequence=[CORES["primaria"]],
+                labels={"dia_semana": "", "faturamento": ""},
             )
+
+            aplicar_padrao_grafico(grafico_dia_semana, moeda_eixo_y=True)
 
             st.plotly_chart(
                 grafico_dia_semana,
                 use_container_width=True,
+                config={"displayModeBar": False},
             )
 
-        st.divider()
-        st.markdown("#### Clientes")
-        st.caption("Novos vs. recorrentes")
+        cabecalho_secao(
+            "Clientes",
+            "Novos vs. recorrentes e taxa de recompra.",
+            "👥",
+        )
 
         historico_completo = carregar_historico_completo(
             data_final.isoformat(),
@@ -1096,8 +884,11 @@ def exibir_dashboard() -> None:
                     f"{total_clientes_historico} clientes únicos."
                 )
 
-        st.divider()
-        st.markdown("#### Pedidos do período")
+        cabecalho_secao(
+            "Pedidos do período",
+            "Lista detalhada de todos os pedidos no filtro selecionado.",
+            "🧾",
+        )
 
         with st.container(border=True):
             tabela = df.sort_values(
@@ -1198,11 +989,12 @@ def exibir_dashboard() -> None:
                 ranking.iloc[0]["descricao"] if not ranking.empty else "—"
             )
 
-            st.markdown("#### Resumo de produtos")
-            st.caption(
+            cabecalho_secao(
+                "Resumo de produtos",
                 f"Baseado em {pedidos_sincronizados_periodo} pedido(s) "
                 "já sincronizado(s) neste período (pode não ser 100% "
-                "dos pedidos do período — veja a sincronização acima)."
+                "dos pedidos — veja a sincronização acima).",
+                "🛒",
             )
 
             coluna_p1, coluna_p2, coluna_p3, coluna_p4 = st.columns(4)
@@ -1222,8 +1014,11 @@ def exibir_dashboard() -> None:
             with coluna_p4:
                 card_kpi("Produto líder", produto_lider)
 
-            st.divider()
-            st.markdown("#### Ranking de produtos")
+            cabecalho_secao(
+                "Ranking de produtos",
+                "Top produtos por faturamento no período.",
+                "🏆",
+            )
 
             with st.container(border=True):
                 top_produtos = ranking.head(10)
@@ -1234,19 +1029,24 @@ def exibir_dashboard() -> None:
                     y="descricao",
                     orientation="h",
                     title="Top 10 produtos por faturamento",
-                    labels={
-                        "descricao": "Produto",
-                        "faturamento": "Faturamento",
-                    },
+                    color_discrete_sequence=[CORES["primaria"]],
+                    labels={"descricao": "", "faturamento": ""},
                 )
 
                 grafico_ranking.update_yaxes(
                     categoryorder="total ascending"
                 )
 
+                aplicar_padrao_grafico(
+                    grafico_ranking,
+                    altura=ALTURA_GRAFICO_PRINCIPAL,
+                    moeda_eixo_x=True,
+                )
+
                 st.plotly_chart(
                     grafico_ranking,
                     use_container_width=True,
+                    config={"displayModeBar": False},
                 )
 
                 tabela_ranking = ranking.copy()
@@ -1268,8 +1068,12 @@ def exibir_dashboard() -> None:
                     hide_index=True,
                 )
 
-            st.divider()
-            st.markdown("#### Curva ABC (por faturamento)")
+            cabecalho_secao(
+                "Curva ABC",
+                "Classificação dos produtos por participação acumulada "
+                "na receita.",
+                "🔤",
+            )
 
             with st.container(border=True):
                 curva_abc = ranking.copy()
@@ -1313,20 +1117,25 @@ def exibir_dashboard() -> None:
                         y="acumulado",
                         color="classe",
                         title="Participação acumulada na receita",
-                        labels={
-                            "descricao": "Produto",
-                            "acumulado": "Participação acumulada",
+                        color_discrete_map={
+                            "A": CORES["primaria"],
+                            "B": CORES["secundaria"],
+                            "C": CORES["cinza_grafico"],
                         },
+                        labels={"descricao": "", "acumulado": ""},
                     )
 
-                    grafico_abc.update_yaxes(tickformat=".0%")
-                    grafico_abc.update_xaxes(
-                        showticklabels=False,
+                    aplicar_padrao_grafico(
+                        grafico_abc,
+                        percentual_eixo_y=True,
                     )
+
+                    grafico_abc.update_xaxes(showticklabels=False)
 
                     st.plotly_chart(
                         grafico_abc,
                         use_container_width=True,
+                        config={"displayModeBar": False},
                     )
 
                 with coluna_abc_tabela:
@@ -1351,8 +1160,11 @@ def exibir_dashboard() -> None:
                         hide_index=True,
                     )
 
-            st.divider()
-            st.markdown("#### Produtos comprados juntos")
+            cabecalho_secao(
+                "Produtos comprados juntos",
+                "Pares de produtos que aparecem no mesmo pedido.",
+                "🧩",
+            )
 
             with st.container(border=True):
                 pares_encontrados: dict[tuple[str, str], int] = {}
@@ -1479,10 +1291,11 @@ def exibir_dashboard() -> None:
             )
             projecao_anual_base = media_ultimos_7 * 365
 
-            st.markdown("#### Cenários")
-            st.caption(
+            cabecalho_secao(
+                "Cenários",
                 "Base = média dos últimos 7 dias. Otimista/pessimista "
-                "= base ±10%. Não considera sazonalidade ou campanhas."
+                "= base ±10%. Não considera sazonalidade ou campanhas.",
+                "🔮",
             )
 
             coluna_pr1, coluna_pr2, coluna_pr3, coluna_pr4 = st.columns(4)
@@ -1544,8 +1357,11 @@ def exibir_dashboard() -> None:
                     "Média diária recente × 365",
                 )
 
-            st.divider()
-            st.markdown("#### Tendência")
+            cabecalho_secao(
+                "Tendência",
+                "Faturamento diário e médias móveis de 7 e 14 dias.",
+                "📉",
+            )
 
             with st.container(border=True):
                 dados_grafico = diario_total.tail(90).melt(
@@ -1571,19 +1387,31 @@ def exibir_dashboard() -> None:
                     y="valor",
                     color="serie",
                     title="Faturamento diário e médias móveis (últimos 90 dias)",
-                    labels={
-                        "data": "Data",
-                        "valor": "Faturamento",
-                        "serie": "",
+                    color_discrete_map={
+                        "Faturamento diário": CORES["cinza_grafico"],
+                        "Média móvel 7 dias": CORES["primaria"],
+                        "Média móvel 14 dias": CORES["secundaria"],
                     },
+                    labels={"data": "", "valor": "", "serie": ""},
+                )
+
+                aplicar_padrao_grafico(
+                    grafico_tendencia,
+                    altura=ALTURA_GRAFICO_PRINCIPAL,
+                    moeda_eixo_y=True,
                 )
 
                 st.plotly_chart(
                     grafico_tendencia,
                     use_container_width=True,
+                    config={"displayModeBar": False},
                 )
 
-            st.markdown("#### Tendência por canal")
+            cabecalho_secao(
+                "Tendência por canal",
+                "Mesma série, separada por canal.",
+                "🛰️",
+            )
 
             with st.container(border=True):
                 historico_recente = historico.loc[
@@ -1602,68 +1430,119 @@ def exibir_dashboard() -> None:
                     color="canal_nome",
                     title="Faturamento diário por canal (últimos 60 dias)",
                     labels={
-                        "data": "Data",
-                        "faturamento_valido": "Faturamento",
-                        "canal_nome": "Canal",
+                        "data": "",
+                        "faturamento_valido": "",
+                        "canal_nome": "",
                     },
+                )
+
+                aplicar_padrao_grafico(
+                    grafico_canal_tendencia,
+                    moeda_eixo_y=True,
                 )
 
                 st.plotly_chart(
                     grafico_canal_tendencia,
                     use_container_width=True,
+                    config={"displayModeBar": False},
                 )
 
-            st.divider()
-            st.markdown("#### Insights")
+            cabecalho_secao(
+                "Insights",
+                "Leitura automática da tendência recente.",
+                "💡",
+            )
 
-            with st.container(border=True):
-                tendencia_texto = (
-                    "em alta" if (aceleracao or 0) > 0.02
-                    else "em queda" if (aceleracao or 0) < -0.02
-                    else "estável"
+            tendencia_texto = (
+                "em alta" if (aceleracao or 0) > 0.02
+                else "em queda" if (aceleracao or 0) < -0.02
+                else "estável"
+            )
+
+            tipo_tendencia = (
+                "good" if (aceleracao or 0) > 0.02
+                else "bad" if (aceleracao or 0) < -0.02
+                else "primary"
+            )
+
+            texto_ritmo = (
+                f"Média de {moeda_br(media_ultimos_7)}/dia nos últimos "
+                "7 dias"
+                + (
+                    f", {aceleracao:+.1%} em relação aos 7 dias anteriores."
+                    if aceleracao is not None
+                    else "."
                 )
+            )
 
-                insights = [
-                    (
-                        f"O faturamento diário está **{tendencia_texto}**: "
-                        f"média de {moeda_br(media_ultimos_7)}/dia nos "
-                        "últimos 7 dias"
-                        + (
-                            f", {aceleracao:+.1%} em relação aos 7 dias "
-                            "anteriores."
-                            if aceleracao is not None
-                            else "."
-                        )
-                    ),
-                    (
-                        "Se esse ritmo continuar, a projeção é de "
-                        f"{moeda_br(projecao_semanal_base)} na próxima "
-                        f"semana e {moeda_br(projecao_mensal_base)} no "
-                        "fechamento deste mês (entre "
-                        f"{moeda_br(projecao_mensal_pessimista)} no "
-                        f"cenário pessimista e "
-                        f"{moeda_br(projecao_mensal_otimista)} no "
-                        "otimista)."
-                    ),
-                ]
+            texto_projecao = (
+                "Se esse ritmo continuar, a projeção é de "
+                f"{moeda_br(projecao_semanal_base)} na próxima semana e "
+                f"{moeda_br(projecao_mensal_base)} no fechamento deste "
+                f"mês (entre {moeda_br(projecao_mensal_pessimista)} no "
+                f"cenário pessimista e {moeda_br(projecao_mensal_otimista)} "
+                "no otimista)."
+            )
 
-                for linha in insights:
-                    # "R$" tem um único "$"; em pares, o markdown do
-                    # Streamlit interpreta como LaTeX. Escapamos.
-                    st.markdown(f"- {linha}".replace("$", "\\$"))
+            # card_insight renderiza dentro de uma <div> HTML pura, então
+            # o "$" não é interpretado como LaTeX (isso só acontece em
+            # texto markdown puro, como em st.markdown sem HTML).
+            card_insight(
+                f"Ritmo {tendencia_texto}",
+                texto_ritmo,
+                tipo_tendencia,
+            )
+
+            card_insight(
+                "Projeção se o ritmo continuar",
+                texto_projecao,
+                "primary",
+            )
 
     with aba_metas:
-        metas_df = ler_metas()
-        historico_metas = ler_historico_diario()
-
-        comparativo = montar_comparativo(metas_df, historico_metas, hoje)
-
         if comparativo.empty:
             st.info(
                 "Nenhuma meta cadastrada ainda. Use \"Cadastrar meta\" "
                 "abaixo."
             )
         else:
+            cabecalho_secao(
+                "Progresso por meta",
+                "Realizado vs. meta de cada período cadastrado.",
+                "🎯",
+            )
+
+            linhas_card = list(comparativo.iterrows())
+
+            for inicio in range(0, len(linhas_card), 3):
+                colunas_meta = st.columns(3)
+
+                for coluna_meta, (_, linha) in zip(
+                    colunas_meta, linhas_card[inicio : inicio + 3]
+                ):
+                    with coluna_meta:
+                        rotulo_exibido = (
+                            linha["rotulo"] or nome_canal(linha["canal"])
+                        )
+
+                        card_meta(
+                            rotulo_exibido,
+                            linha["realizado"],
+                            linha["meta"],
+                            linha["classificacao"],
+                            subtitulo=(
+                                f"{linha['referencia_inicio'].strftime('%d/%m')} "
+                                f"a {linha['referencia_fim'].strftime('%d/%m')}"
+                            ),
+                        )
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            cabecalho_secao(
+                "Detalhamento",
+                "Todos os campos calculados, por meta cadastrada.",
+                "📋",
+            )
+
             tabela_comparativo = comparativo.copy()
 
             tabela_comparativo["canal"] = tabela_comparativo[
