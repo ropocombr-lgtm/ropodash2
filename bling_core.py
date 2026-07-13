@@ -295,13 +295,19 @@ def processar_callback_oauth() -> None:
 # CLIENTE DA API
 # =========================================================
 
+MAX_TENTATIVAS_429 = 6
+
+
 def consultar_bling(
     endpoint: str,
     parametros: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     access_token = obter_access_token()
 
-    for tentativa in range(2):
+    tentativa_auth_usada = False
+    tentativas_429 = 0
+
+    while True:
         resposta = requests.get(
             f"{API_BASE_URL}{endpoint}",
             params=parametros,
@@ -313,15 +319,27 @@ def consultar_bling(
             timeout=40,
         )
 
-        if resposta.status_code == 401 and tentativa == 0:
+        if resposta.status_code == 401 and not tentativa_auth_usada:
+            tentativa_auth_usada = True
             access_token = obter_access_token(forcar_renovacao=True)
             continue
 
         if resposta.status_code == 429:
-            raise RuntimeError(
-                "O limite de requisições do Bling foi atingido. "
-                "Aguarde alguns instantes antes de atualizar novamente."
+            tentativas_429 += 1
+
+            if tentativas_429 > MAX_TENTATIVAS_429:
+                raise RuntimeError(
+                    "O limite de requisições do Bling foi atingido "
+                    "repetidamente. Aguarde alguns minutos antes de "
+                    "atualizar novamente."
+                )
+
+            espera = float(
+                resposta.headers.get("Retry-After", 5 * tentativas_429)
             )
+
+            time.sleep(espera)
+            continue
 
         if not resposta.ok:
             raise RuntimeError(
@@ -330,8 +348,6 @@ def consultar_bling(
             )
 
         return resposta.json()
-
-    raise RuntimeError("Não foi possível autenticar a requisição no Bling.")
 
 
 def buscar_pedidos(
@@ -614,6 +630,7 @@ def sincronizar_itens_pedidos(
     df: pd.DataFrame,
     limite_pedidos: int | None = None,
     progresso: Any = None,
+    pausa_segundos: float = 0.4,
 ) -> int:
     if df.empty:
         return 0
@@ -680,8 +697,7 @@ def sincronizar_itens_pedidos(
         if progresso is not None:
             progresso(indice + 1, total_pendentes)
 
-        # Mantém o consumo abaixo de três chamadas por segundo.
-        time.sleep(0.4)
+        time.sleep(pausa_segundos)
 
     return total_pendentes
 

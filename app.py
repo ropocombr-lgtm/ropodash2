@@ -13,6 +13,7 @@ from bling_core import (
     carregar_dataframe,
     carregar_historico_completo,
     gerar_url_autorizacao,
+    ler_historico_diario,
     ler_itens_pedidos,
     ler_tokens,
     moeda_br,
@@ -1401,12 +1402,258 @@ def exibir_dashboard() -> None:
                     )
 
     with aba_preditivo:
-        st.info(
-            "Em construção. As projeções semanal, mensal e anual serão "
-            "calculadas a partir do histórico diário já usado na aba "
-            "Comercial — sem custo extra de API. Chegam na próxima "
-            "atualização."
-        )
+        historico = ler_historico_diario()
+
+        if historico.empty:
+            st.info(
+                "Ainda não há histórico diário suficiente. Ele vai se "
+                "acumulando automaticamente a cada acesso ao dashboard."
+            )
+        elif historico["data"].nunique() < 14:
+            st.info(
+                "Ainda há menos de 14 dias de histórico diário "
+                "acumulado — volte em alguns dias para ver projeções "
+                "mais confiáveis."
+            )
+        else:
+            diario_total = (
+                historico.groupby("data", as_index=False)
+                .agg(
+                    faturamento=("faturamento_valido", "sum"),
+                    pedidos=("pedidos", "sum"),
+                )
+                .sort_values("data")
+            )
+
+            diario_total["mm7"] = (
+                diario_total["faturamento"]
+                .rolling(7, min_periods=1)
+                .mean()
+            )
+
+            diario_total["mm14"] = (
+                diario_total["faturamento"]
+                .rolling(14, min_periods=1)
+                .mean()
+            )
+
+            media_ultimos_7 = float(
+                diario_total["faturamento"].tail(7).mean()
+            )
+
+            media_7_anteriores = (
+                float(diario_total["faturamento"].iloc[-14:-7].mean())
+                if len(diario_total) >= 14
+                else None
+            )
+
+            aceleracao = variacao_percentual(
+                media_ultimos_7,
+                media_7_anteriores,
+            ) if media_7_anteriores else None
+
+            hoje_pred = diario_total["data"].max()
+            inicio_mes_pred = hoje_pred.replace(day=1)
+            dias_no_mes_pred = calendar.monthrange(
+                hoje_pred.year, hoje_pred.month
+            )[1]
+            dias_restantes_mes_pred = max(
+                dias_no_mes_pred - hoje_pred.day, 0
+            )
+
+            acumulado_mes_pred = float(
+                diario_total.loc[
+                    diario_total["data"] >= inicio_mes_pred, "faturamento"
+                ].sum()
+            )
+
+            projecao_semanal_base = media_ultimos_7 * 7
+            projecao_mensal_base = (
+                acumulado_mes_pred
+                + media_ultimos_7 * dias_restantes_mes_pred
+            )
+            projecao_mensal_otimista = (
+                acumulado_mes_pred
+                + (media_ultimos_7 * 1.1) * dias_restantes_mes_pred
+            )
+            projecao_mensal_pessimista = (
+                acumulado_mes_pred
+                + (media_ultimos_7 * 0.9) * dias_restantes_mes_pred
+            )
+            projecao_anual_base = media_ultimos_7 * 365
+
+            st.markdown("#### Cenários")
+            st.caption(
+                "Base = média dos últimos 7 dias. Otimista/pessimista "
+                "= base ±10%. Não considera sazonalidade ou campanhas."
+            )
+
+            coluna_pr1, coluna_pr2, coluna_pr3, coluna_pr4 = st.columns(4)
+
+            with coluna_pr1:
+                card_kpi(
+                    "Projeção semanal",
+                    moeda_br(projecao_semanal_base),
+                    "Próximos 7 dias, ritmo atual",
+                )
+
+            with coluna_pr2:
+                card_kpi(
+                    "Projeção mensal",
+                    moeda_br(projecao_mensal_base),
+                    "Fechamento do mês, cenário base",
+                )
+
+            with coluna_pr3:
+                card_kpi(
+                    "Cenário otimista (mês)",
+                    moeda_br(projecao_mensal_otimista),
+                    "Ritmo +10%",
+                    delta_tipo="good",
+                )
+
+            with coluna_pr4:
+                card_kpi(
+                    "Cenário pessimista (mês)",
+                    moeda_br(projecao_mensal_pessimista),
+                    "Ritmo -10%",
+                    delta_tipo="bad",
+                )
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            coluna_pr5, coluna_pr6 = st.columns(2)
+
+            with coluna_pr5:
+                card_kpi(
+                    "Média diária (últimos 7 dias)",
+                    moeda_br(media_ultimos_7),
+                    delta=(
+                        f"{aceleracao:+.1%} vs. 7 dias anteriores"
+                        if aceleracao is not None
+                        else None
+                    ),
+                    delta_tipo=(
+                        "good"
+                        if (aceleracao or 0) >= 0
+                        else "bad"
+                    ),
+                )
+
+            with coluna_pr6:
+                card_kpi(
+                    "Projeção anualizada",
+                    moeda_br(projecao_anual_base),
+                    "Média diária recente × 365",
+                )
+
+            st.divider()
+            st.markdown("#### Tendência")
+
+            with st.container(border=True):
+                dados_grafico = diario_total.tail(90).melt(
+                    id_vars=["data"],
+                    value_vars=["faturamento", "mm7", "mm14"],
+                    var_name="serie",
+                    value_name="valor",
+                )
+
+                nomes_serie = {
+                    "faturamento": "Faturamento diário",
+                    "mm7": "Média móvel 7 dias",
+                    "mm14": "Média móvel 14 dias",
+                }
+
+                dados_grafico["serie"] = dados_grafico["serie"].map(
+                    nomes_serie
+                )
+
+                grafico_tendencia = px.line(
+                    dados_grafico,
+                    x="data",
+                    y="valor",
+                    color="serie",
+                    title="Faturamento diário e médias móveis (últimos 90 dias)",
+                    labels={
+                        "data": "Data",
+                        "valor": "Faturamento",
+                        "serie": "",
+                    },
+                )
+
+                st.plotly_chart(
+                    grafico_tendencia,
+                    use_container_width=True,
+                )
+
+            st.markdown("#### Tendência por canal")
+
+            with st.container(border=True):
+                historico_recente = historico.loc[
+                    historico["data"]
+                    >= (hoje_pred - timedelta(days=60))
+                ].copy()
+
+                historico_recente["canal_nome"] = historico_recente[
+                    "canal"
+                ].apply(nome_canal)
+
+                grafico_canal_tendencia = px.line(
+                    historico_recente.sort_values("data"),
+                    x="data",
+                    y="faturamento_valido",
+                    color="canal_nome",
+                    title="Faturamento diário por canal (últimos 60 dias)",
+                    labels={
+                        "data": "Data",
+                        "faturamento_valido": "Faturamento",
+                        "canal_nome": "Canal",
+                    },
+                )
+
+                st.plotly_chart(
+                    grafico_canal_tendencia,
+                    use_container_width=True,
+                )
+
+            st.divider()
+            st.markdown("#### Insights")
+
+            with st.container(border=True):
+                tendencia_texto = (
+                    "em alta" if (aceleracao or 0) > 0.02
+                    else "em queda" if (aceleracao or 0) < -0.02
+                    else "estável"
+                )
+
+                insights = [
+                    (
+                        f"O faturamento diário está **{tendencia_texto}**: "
+                        f"média de {moeda_br(media_ultimos_7)}/dia nos "
+                        "últimos 7 dias"
+                        + (
+                            f", {aceleracao:+.1%} em relação aos 7 dias "
+                            "anteriores."
+                            if aceleracao is not None
+                            else "."
+                        )
+                    ),
+                    (
+                        "Se esse ritmo continuar, a projeção é de "
+                        f"{moeda_br(projecao_semanal_base)} na próxima "
+                        f"semana e {moeda_br(projecao_mensal_base)} no "
+                        "fechamento deste mês (entre "
+                        f"{moeda_br(projecao_mensal_pessimista)} no "
+                        f"cenário pessimista e "
+                        f"{moeda_br(projecao_mensal_otimista)} no "
+                        "otimista)."
+                    ),
+                ]
+
+                for linha in insights:
+                    # "R$" tem um único "$"; em pares, o markdown do
+                    # Streamlit interpreta como LaTeX. Escapamos.
+                    st.markdown(f"- {linha}".replace("$", "\\$"))
 
     with aba_metas:
         metas_df = ler_metas()
