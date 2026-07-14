@@ -243,6 +243,27 @@ def injetar_css_tv() -> None:
             margin-top: 8px;
         }
 
+        .tv-chart-wrap-bars svg {
+            height: auto;
+            max-height: min(58vh, 460px);
+        }
+
+        .tv-chart-bar-label {
+            fill: var(--tv-muted);
+            font-size: 27px;
+        }
+
+        .tv-chart-bar-value {
+            fill: var(--tv-text);
+            font-weight: 800;
+            font-size: 27px;
+        }
+
+        .tv-incentivo-card {
+            border: 2px solid var(--tv-good);
+            background: linear-gradient(180deg, rgba(34, 197, 94, 0.16), rgba(15, 31, 52, 0.96));
+        }
+
         .tv-list {
             display: flex;
             flex-direction: column;
@@ -371,6 +392,8 @@ def card_tv_lista(
     itens: list[str] | None = None,
     chip: str = "",
     chip_tipo: str = "neutral",
+    extra_html: str = "",
+    classe_extra: str = "",
 ) -> str:
     lista_html = ""
     if itens:
@@ -387,13 +410,61 @@ def card_tv_lista(
     )
 
     return (
-        f'<div class="tv-card">'
+        f'<div class="tv-card {escape(classe_extra)}">'
         f'<div class="tv-card-label">{escape(titulo)}</div>'
         f'<div class="tv-card-value">{escape(valor)}</div>'
         f'<div class="tv-card-detail">{escape(detalhe)}</div>'
+        f"{extra_html}"
         f'{lista_html}'
         f'{chip_html}'
         '</div>'
+    )
+
+
+def _truncar_texto(texto: str, maximo: int = 46) -> str:
+    texto = str(texto)
+
+    if len(texto) <= maximo:
+        return texto
+
+    return texto[: maximo - 1].rstrip() + "…"
+
+
+def grafico_barras_svg(
+    itens: list[tuple[str, float]],
+    cor_barra: str = "#38bdf8",
+) -> str:
+    if not itens:
+        return ""
+
+    largura = 1000
+    altura_item = 72
+    altura = altura_item * len(itens)
+    maior_valor = max((valor for _, valor in itens), default=0.0) or 1.0
+    largura_max_barra = largura - 230
+
+    partes = []
+
+    for indice, (rotulo, valor) in enumerate(itens):
+        y_base = indice * altura_item
+        largura_barra = max((valor / maior_valor) * largura_max_barra, 8)
+
+        partes.append(
+            f'<text x="0" y="{y_base + 20}" class="tv-chart-bar-label">'
+            f'{escape(_truncar_texto(rotulo))}</text>'
+            f'<rect x="0" y="{y_base + 30}" width="{largura_barra:.1f}" height="26" '
+            f'rx="6" fill="{cor_barra}" />'
+            f'<text x="{largura_barra + 16:.1f}" y="{y_base + 49}" '
+            f'class="tv-chart-bar-value">{escape(moeda_br(valor))}</text>'
+        )
+
+    return (
+        '<div class="tv-chart-wrap tv-chart-wrap-bars">'
+        f'<svg viewBox="0 0 {largura} {altura}" role="img" '
+        'aria-label="Gráfico de barras" preserveAspectRatio="xMinYMin meet">'
+        f'{"".join(partes)}'
+        "</svg>"
+        "</div>"
     )
 
 
@@ -947,6 +1018,24 @@ def renderizar_tv() -> None:
         )
     )
 
+    # Mensagem fixa (não calculada) para o time — peça para eu trocar o
+    # texto sempre que quiser, não depende de nenhum dado do Bling.
+    cards.append(
+        card_tv_lista(
+            "Incentivo do time",
+            "Toda venda conta!",
+            "Um lembrete para o time ROPO:",
+            [
+                "Consistência todo dia vale mais que um pico isolado.",
+                "Cada pedido bem atendido é cliente que volta a comprar.",
+                "O resultado do time é maior que a soma das partes — bora juntos! 🚀",
+            ],
+            chip="Time ROPO",
+            chip_tipo="good",
+            classe_extra="tv-incentivo-card",
+        )
+    )
+
     cards.append(
         card_tv_lista(
             "Resumo operacional",
@@ -990,6 +1079,27 @@ def renderizar_tv() -> None:
             )
         )
 
+    if not ranking_produtos.empty:
+        top_produtos_grafico = ranking_produtos.head(5)
+        cards.append(
+            card_tv(
+                "Top produtos do dia",
+                moeda_br(float(top_produtos_grafico["faturamento"].sum())),
+                "Faturamento em itens dos produtos mais vendidos",
+                extra_html=grafico_barras_svg(
+                    list(
+                        zip(
+                            top_produtos_grafico["descricao"],
+                            top_produtos_grafico["faturamento"].astype(float),
+                        )
+                    ),
+                    cor_barra="#a78bfa",
+                ),
+                chip="Ranking de produtos",
+                chip_tipo="neutral",
+            )
+        )
+
     if not receita_por_canal.empty:
         top_lojas = receita_por_canal.head(3).copy()
         linhas_lojas = [
@@ -1004,6 +1114,14 @@ def renderizar_tv() -> None:
                 melhor_loja["canal"] if melhor_loja is not None else "—",
                 "Melhor loja do dia",
                 linhas_lojas,
+                extra_html=grafico_barras_svg(
+                    list(
+                        zip(
+                            top_lojas["canal"],
+                            top_lojas["faturamento"].astype(float),
+                        )
+                    )
+                ),
                 chip="Faturamento / vendas",
                 chip_tipo="good",
             )
