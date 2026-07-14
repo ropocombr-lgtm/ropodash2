@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import calendar
 from datetime import date, datetime, time, timedelta
 from html import escape
@@ -24,6 +25,16 @@ from bling_core import (
 )
 
 SEGUNDOS_POR_CARD = 7
+
+NOMES_DIA_SEMANA_CURTO = {
+    0: "Seg",
+    1: "Ter",
+    2: "Qua",
+    3: "Qui",
+    4: "Sex",
+    5: "Sáb",
+    6: "Dom",
+}
 
 st.set_page_config(
     page_title="Televisão - Dashboard Bling",
@@ -195,9 +206,46 @@ def injetar_css_tv() -> None:
             background: linear-gradient(90deg, var(--tv-blue), var(--tv-good));
         }
 
+        /*
+        Cards com gráfico embutido cedem espaço do "número gigante" (pensado
+        pra cards de KPI único) pro gráfico, senão o conteúdo empilhado
+        (label + número + detalhe + gráfico + lista + chip) estoura a altura
+        fixa do .tv-card, que tem overflow:hidden — o gráfico simplesmente
+        some, cortado, sem nenhum erro visível.
+        */
+        .tv-chart-card {
+            padding: clamp(20px, 2.5vw, 44px);
+        }
+
+        .tv-chart-card .tv-card-label {
+            font-size: clamp(0.95rem, 1.3vw, 1.6rem);
+        }
+
         .tv-chart-card .tv-card-value {
             font-size: clamp(2.6rem, 5.4vw, 7.4rem);
-            margin-bottom: 10px;
+            margin: 8px 0;
+        }
+
+        .tv-chart-card .tv-card-detail {
+            font-size: clamp(1rem, 1.5vw, 1.8rem);
+        }
+
+        .tv-chart-card .tv-chart-wrap {
+            margin-top: 12px;
+        }
+
+        .tv-chart-card .tv-list {
+            margin-top: 12px;
+            gap: 6px;
+        }
+
+        .tv-chart-card .tv-list-item {
+            padding: 6px 10px;
+            font-size: clamp(0.85rem, 1vw, 1.1rem);
+        }
+
+        .tv-chart-card .tv-chip {
+            margin-top: 14px;
         }
 
         .tv-chart-wrap {
@@ -241,11 +289,6 @@ def injetar_css_tv() -> None:
             color: var(--tv-muted);
             font-size: clamp(0.9rem, 1.1vw, 1.2rem);
             margin-top: 8px;
-        }
-
-        .tv-chart-wrap-bars svg {
-            height: auto;
-            max-height: min(58vh, 460px);
         }
 
         .tv-chart-bar-label {
@@ -430,6 +473,52 @@ def _truncar_texto(texto: str, maximo: int = 46) -> str:
     return texto[: maximo - 1].rstrip() + "…"
 
 
+def _imagem_svg(
+    svg_interno: str,
+    largura: int,
+    altura: int,
+    altura_css: str,
+    aria_label: str,
+) -> str:
+    # st.html() nesta versão do Streamlit remove qualquer <svg> inline da
+    # página (confirmado: sobrava um <div class="tv-chart-wrap"> vazio, sem
+    # nenhum <svg> dentro). A saída é embutir o SVG como imagem base64 — um
+    # <img> nunca é removido. Por isso todo o SVG abaixo usa cor/fonte fixas
+    # em vez de classes CSS: uma imagem embutida não enxerga o <style> da
+    # página.
+    # width/height explícitos (não só viewBox) evitam um problema conhecido
+    # do Chromium: <img> apontando pra um SVG sem tamanho intrínseco
+    # explícito pode combinar mal com object-fit e desenhar o conteúdo
+    # deslocado dentro da própria caixa da imagem.
+    # preserveAspectRatio="none": confirmado por teste isolado que, sem
+    # isso, o padrão ("xMidYMid meet") centraliza o desenho original
+    # (1000x{altura}) dentro da caixa esticada do <img> em vez de esticar
+    # junto — sobrava uma faixa vazia grande à esquerda e à direita do
+    # gráfico, mesmo com object-fit:fill no <img>.
+    svg_completo = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{largura}" height="{altura}" '
+        f'viewBox="0 0 {largura} {altura}" preserveAspectRatio="none" '
+        f'role="img" aria-label="{escape(aria_label)}">'
+        f"{svg_interno}"
+        "</svg>"
+    )
+
+    b64 = base64.b64encode(svg_completo.encode("utf-8")).decode("ascii")
+
+    # width:100% + altura fixa preenche o card de ponta a ponta (o que
+    # importa aqui é o gráfico aparecer visível e legível). object-fit:contain
+    # foi tentado, mas como o viewBox interno (pensado pra unidades de
+    # desenho, não pra proporção final na tela) é bem mais "quadrado" que o
+    # card (bem largo e baixo), contain encolhia o gráfico numa ilha pequena
+    # no meio do card em vez de preencher a largura. Um esticamento leve é
+    # aceitável pra barras/linhas/texto — não é uma foto.
+    return (
+        f'<img src="data:image/svg+xml;base64,{b64}" '
+        f'alt="{escape(aria_label)}" '
+        f'style="display:block;width:100%;height:{altura_css};" />'
+    )
+
+
 def grafico_barras_svg(
     itens: list[tuple[str, float]],
     cor_barra: str = "#38bdf8",
@@ -440,32 +529,48 @@ def grafico_barras_svg(
     largura = 1000
     altura_item = 72
     altura = altura_item * len(itens)
+    # Limite conservador: o card tem altura fixa e overflow:hidden (label +
+    # número + detalhe + gráfico + chip todos disputam o mesmo espaço), então
+    # um gráfico "alto demais" simplesmente some cortado, sem erro nenhum.
+    altura_px = min(48 * len(itens) + 16, 260)
     maior_valor = max((valor for _, valor in itens), default=0.0) or 1.0
     largura_max_barra = largura - 230
 
-    partes = []
+    partes = [
+        f'<line x1="{largura_max_barra * 0.33:.1f}" y1="0" '
+        f'x2="{largura_max_barra * 0.33:.1f}" y2="{altura}" '
+        'stroke="rgba(226,232,240,0.11)" stroke-width="1" />',
+        f'<line x1="{largura_max_barra * 0.66:.1f}" y1="0" '
+        f'x2="{largura_max_barra * 0.66:.1f}" y2="{altura}" '
+        'stroke="rgba(226,232,240,0.11)" stroke-width="1" />',
+        f'<line x1="0" y1="0" x2="0" y2="{altura}" '
+        'stroke="rgba(226,232,240,0.28)" stroke-width="2" />',
+    ]
 
     for indice, (rotulo, valor) in enumerate(itens):
         y_base = indice * altura_item
         largura_barra = max((valor / maior_valor) * largura_max_barra, 8)
 
         partes.append(
-            f'<text x="0" y="{y_base + 20}" class="tv-chart-bar-label">'
+            f'<text x="0" y="{y_base + 20}" fill="#a7b7cc" font-size="27" '
+            f'font-family="Arial, sans-serif">'
             f'{escape(_truncar_texto(rotulo))}</text>'
             f'<rect x="0" y="{y_base + 30}" width="{largura_barra:.1f}" height="26" '
             f'rx="6" fill="{cor_barra}" />'
             f'<text x="{largura_barra + 16:.1f}" y="{y_base + 49}" '
-            f'class="tv-chart-bar-value">{escape(moeda_br(valor))}</text>'
+            f'fill="#f8fafc" font-weight="800" font-size="27" '
+            f'font-family="Arial, sans-serif">{escape(moeda_br(valor))}</text>'
         )
 
-    return (
-        '<div class="tv-chart-wrap tv-chart-wrap-bars">'
-        f'<svg viewBox="0 0 {largura} {altura}" role="img" '
-        'aria-label="Gráfico de barras" preserveAspectRatio="xMinYMin meet">'
-        f'{"".join(partes)}'
-        "</svg>"
-        "</div>"
+    imagem = _imagem_svg(
+        "".join(partes),
+        largura,
+        altura,
+        f"{altura_px}px",
+        "Gráfico de barras",
     )
+
+    return f'<div class="tv-chart-wrap tv-chart-wrap-bars">{imagem}</div>'
 
 
 def resumo_dia(df_validos: pd.DataFrame, hoje: date) -> tuple[float, int]:
@@ -561,7 +666,8 @@ def card_evolucao(
 
     polilinha = " ".join(f"{x:.1f},{y:.1f}" for x, y in pontos)
     dots = "".join(
-        f'<circle class="tv-chart-dot" cx="{x:.1f}" cy="{y:.1f}" r="8" />'
+        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="8" '
+        'fill="#22c55e" stroke="#0f1f34" stroke-width="4" />'
         for x, y in pontos
     )
 
@@ -577,15 +683,29 @@ def card_evolucao(
         faturamento_hoje / media_7 if media_7 else None
     )
 
+    svg_interno = (
+        f'<line x1="{margem_x}" y1="{margem_y}" x2="{largura - margem_x}" y2="{margem_y}" '
+        'stroke="rgba(226,232,240,0.11)" stroke-width="1" />'
+        f'<line x1="{margem_x}" y1="{altura / 2}" x2="{largura - margem_x}" y2="{altura / 2}" '
+        'stroke="rgba(226,232,240,0.11)" stroke-width="1" />'
+        f'<line x1="{margem_x}" y1="{altura - margem_y}" x2="{largura - margem_x}" y2="{altura - margem_y}" '
+        'stroke="rgba(226,232,240,0.28)" stroke-width="2" />'
+        f'<polyline points="{polilinha}" fill="none" stroke="#38bdf8" '
+        'stroke-width="7" stroke-linecap="round" stroke-linejoin="round" />'
+        f"{dots}"
+    )
+
+    imagem = _imagem_svg(
+        svg_interno,
+        largura,
+        altura,
+        "min(34vh, 310px)",
+        "Evolução do faturamento",
+    )
+
     grafico = f"""
     <div class="tv-chart-wrap">
-        <svg viewBox="0 0 {largura} {altura}" role="img" aria-label="Evolução do faturamento">
-            <line class="tv-chart-grid" x1="{margem_x}" y1="{margem_y}" x2="{largura - margem_x}" y2="{margem_y}" />
-            <line class="tv-chart-grid" x1="{margem_x}" y1="{altura / 2}" x2="{largura - margem_x}" y2="{altura / 2}" />
-            <line class="tv-chart-axis" x1="{margem_x}" y1="{altura - margem_y}" x2="{largura - margem_x}" y2="{altura - margem_y}" />
-            <polyline class="tv-chart-line" points="{polilinha}" />
-            {dots}
-        </svg>
+        {imagem}
         <div class="tv-chart-labels">
             <span>{inicio.strftime('%d/%m')}</span>
             <span>Media 7 dias: {moeda_br(media_7)}</span>
@@ -1097,15 +1217,19 @@ def renderizar_tv() -> None:
                 ),
                 chip="Ranking de produtos",
                 chip_tipo="neutral",
+                classe_extra="tv-chart-card",
             )
         )
 
     if not receita_por_canal.empty:
         top_lojas = receita_por_canal.head(3).copy()
+        # Rank e faturamento já aparecem no gráfico; a lista só acrescenta o
+        # que o gráfico não mostra (vendas e ticket médio), então fica curta
+        # de propósito pra não estourar a altura fixa do card.
         linhas_lojas = [
-            f"{idx + 1}º {linha['canal']}: {moeda_br(float(linha['faturamento']))} · "
-            f"{int(linha['pedidos'])} vendas · ticket médio {moeda_br(float(linha['ticket_medio']))}"
-            for idx, (_, linha) in enumerate(top_lojas.iterrows())
+            f"{linha['canal']}: {int(linha['pedidos'])} vendas · "
+            f"ticket médio {moeda_br(float(linha['ticket_medio']))}"
+            for _, linha in top_lojas.iterrows()
         ]
         melhor_loja = top_lojas.iloc[0] if not top_lojas.empty else None
         cards.append(
@@ -1124,6 +1248,7 @@ def renderizar_tv() -> None:
                 ),
                 chip="Faturamento / vendas",
                 chip_tipo="good",
+                classe_extra="tv-chart-card",
             )
         )
     else:
@@ -1235,6 +1360,48 @@ def renderizar_tv() -> None:
             chip_tipo="good" if (variacao_ontem or 0) >= 0 else "bad",
         )
     )
+
+    dados_semana_atual = faturamento_diario.loc[
+        (pd.to_datetime(faturamento_diario["dia"]).dt.date >= inicio_semana)
+        & (pd.to_datetime(faturamento_diario["dia"]).dt.date <= hoje)
+    ].copy()
+
+    if not dados_semana_atual.empty:
+        dados_semana_atual["dia_semana_idx"] = pd.to_datetime(
+            dados_semana_atual["dia"]
+        ).dt.weekday
+        dados_semana_atual = dados_semana_atual.sort_values("dia")
+
+        itens_semana = [
+            (
+                f"{NOMES_DIA_SEMANA_CURTO[linha['dia_semana_idx']]} "
+                f"{pd.to_datetime(linha['dia']).strftime('%d/%m')}",
+                float(linha["faturamento"]),
+            )
+            for _, linha in dados_semana_atual.iterrows()
+        ]
+
+        cards.append(
+            card_tv(
+                "Evolução da semana",
+                moeda_br(float(dados_semana_atual["faturamento"].sum())),
+                f"Faturamento diário de {inicio_semana.strftime('%d/%m')} até hoje",
+                extra_html=grafico_barras_svg(itens_semana, cor_barra="#22c55e"),
+                chip="Semana atual",
+                chip_tipo="neutral",
+                classe_extra="tv-chart-card",
+            )
+        )
+    else:
+        cards.append(
+            card_tv(
+                "Evolução da semana",
+                "—",
+                "Ainda sem faturamento registrado nesta semana.",
+                chip="Semana atual",
+                chip_tipo="neutral",
+            )
+        )
 
     cards.append(
         card_tv_lista(
