@@ -4,6 +4,7 @@ import base64
 import calendar
 from datetime import date, datetime, time, timedelta
 from html import escape
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -25,6 +26,13 @@ from bling_core import (
 )
 
 SEGUNDOS_POR_CARD = 7
+
+CAMINHO_SOM_VENDA = Path(__file__).parent.parent / "assets" / "som_venda.wav"
+
+
+@st.cache_data(show_spinner=False)
+def carregar_som_venda() -> bytes:
+    return CAMINHO_SOM_VENDA.read_bytes()
 
 NOMES_DIA_SEMANA_CURTO = {
     0: "Seg",
@@ -71,6 +79,42 @@ def injetar_css_tv() -> None:
         [data-testid="stSidebar"], [data-testid="stHeader"],
         [data-testid="stToolbar"], footer {
             display: none;
+        }
+
+        /* Só queremos o som da corneta a cada venda nova, não o player
+        visível (barra de áudio) ocupando espaço na tela da TV. */
+        [data-testid="stAudio"] {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            overflow: hidden;
+            opacity: 0;
+        }
+
+        /* Botão de teste da buzina: canto discreto, não disputa espaço com
+        os cards giratórios. */
+        [data-testid="stButton"] {
+            position: fixed;
+            bottom: 18px;
+            right: 18px;
+            z-index: 1000;
+            width: auto;
+        }
+
+        [data-testid="stButton"] button {
+            background: rgba(15, 31, 52, 0.85);
+            border: 1px solid var(--tv-border);
+            color: var(--tv-text);
+            border-radius: 8px;
+            padding: 10px 16px;
+            font-weight: 700;
+            font-size: 0.95rem;
+            box-shadow: 0 10px 26px rgba(0, 0, 0, 0.25);
+        }
+
+        [data-testid="stButton"] button:hover {
+            border-color: var(--tv-blue);
+            color: var(--tv-blue);
         }
 
         .block-container {
@@ -865,6 +909,12 @@ def calcular_cards_metas(
 def renderizar_tv() -> None:
     injetar_css_tv()
 
+    # Também serve pra "destravar" o autoplay de áudio do navegador: a
+    # maioria dos navegadores só libera som automático numa aba depois de
+    # uma interação manual do usuário — clicar aqui uma vez faz isso.
+    if st.button("🔊 Testar buzina", key="testar_buzina"):
+        st.audio(carregar_som_venda(), format="audio/wav", autoplay=True)
+
     agora = agora_sao_paulo()
     hoje = agora.date()
     inicio_mes = hoje.replace(day=1)
@@ -896,6 +946,21 @@ def renderizar_tv() -> None:
     ticket_medio_hoje = (
         faturamento_hoje / pedidos_hoje if pedidos_hoje else 0.0
     )
+
+    # Toca a corneta só quando aparece um pedido novo desde o último
+    # carregamento desta aba — não no primeiro carregamento do dia (senão
+    # tocaria em rajada pra cada venda já existente) nem pra pedidos
+    # cancelados. st.session_state é por aba/sessão de navegador, então cada
+    # TV que ficar com a página aberta detecta suas próprias vendas novas.
+    ids_vendas_hoje = frozenset(df_hoje["id"].dropna().astype(int))
+
+    if "ids_vendas_conhecidas" in st.session_state:
+        vendas_novas = ids_vendas_hoje - st.session_state.ids_vendas_conhecidas
+
+        if vendas_novas:
+            st.audio(carregar_som_venda(), format="audio/wav", autoplay=True)
+
+    st.session_state.ids_vendas_conhecidas = ids_vendas_hoje
 
     df_cancelados_hoje = df.loc[
         (cancelados) & (df["data"].dt.date == hoje)
