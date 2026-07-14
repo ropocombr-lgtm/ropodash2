@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 import plotly.express as px
 import streamlit as st
@@ -9,6 +9,7 @@ from bling_core import (
     SITUACOES_CANCELADAS,
     carregar_dataframe,
     gerar_url_autorizacao,
+    hoje_sao_paulo,
     ler_historico_diario,
     ler_itens_pedidos,
     ler_metas,
@@ -59,7 +60,7 @@ DIAS_HISTORICO = 13
 
 @st.fragment(run_every="1h")
 def exibir_tempo_real() -> None:
-    hoje = date.today()
+    hoje = hoje_sao_paulo()
     inicio_historico = hoje - timedelta(days=DIAS_HISTORICO)
 
     badges_dashboard(

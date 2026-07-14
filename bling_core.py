@@ -6,6 +6,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -70,6 +71,21 @@ def nome_situacao(situacao_id: int | None) -> str:
         situacao_id,
         f"Situação {situacao_id}",
     )
+
+
+# O Bling é um ERP brasileiro e as datas dos pedidos seguem o calendário de
+# São Paulo. Usar a hora local do servidor (`date.today()`) sem fuso horário
+# faz o dashboard "virar o dia" cedo demais sempre que o servidor roda em
+# UTC, escondendo as últimas horas de vendas de cada dia.
+FUSO_SAO_PAULO = ZoneInfo("America/Sao_Paulo")
+
+
+def agora_sao_paulo() -> datetime:
+    return datetime.now(FUSO_SAO_PAULO)
+
+
+def hoje_sao_paulo() -> date:
+    return agora_sao_paulo().date()
 
 
 # =========================================================
@@ -271,7 +287,23 @@ def obter_access_token(forcar_renovacao: bool = False) -> str:
     if token_valido and not forcar_renovacao:
         return tokens["access_token"]
 
-    return renovar_access_token(tokens["refresh_token"])
+    try:
+        return renovar_access_token(tokens["refresh_token"])
+    except RuntimeError:
+        # Várias páginas (dashboard, tempo real, televisão) renovam o mesmo
+        # token compartilhado sem trava. Se outra sessão já rotacionou o
+        # refresh_token entre a leitura acima e esta chamada, esta tentativa
+        # falha; antes de propagar o erro, relê o banco — se outra sessão já
+        # salvou um token válido nesse meio-tempo, usamos ele.
+        tokens_atuais = ler_tokens()
+
+        if tokens_atuais:
+            expires_at_atual = interpretar_data_iso(tokens_atuais["expires_at"])
+
+            if expires_at_atual > datetime.now(timezone.utc) + timedelta(minutes=2):
+                return tokens_atuais["access_token"]
+
+        raise
 
 
 # =========================================================

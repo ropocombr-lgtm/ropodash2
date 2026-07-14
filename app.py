@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import calendar
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import pandas as pd
 import plotly.express as px
@@ -15,6 +15,7 @@ from bling_core import (
     carregar_historico_completo,
     excluir_meta,
     gerar_url_autorizacao,
+    hoje_sao_paulo,
     ler_historico_diario,
     ler_itens_pedidos,
     ler_metas,
@@ -112,7 +113,7 @@ if not tokens_existentes:
 with st.sidebar:
     st.header("Filtros")
 
-    hoje = date.today()
+    hoje = hoje_sao_paulo()
 
     data_inicial = st.date_input(
         "Data inicial",
@@ -146,19 +147,21 @@ with st.sidebar:
         )
 
 
-badges_dashboard(
-    [
-        f"📅 {data_inicial.strftime('%d/%m/%Y')} a "
-        f"{data_final.strftime('%d/%m/%Y')}",
-        "🔄 Atualizado em "
-        f"{datetime.now().strftime('%d/%m/%Y às %H:%M')}",
-        "🟢 Bling conectado",
-    ]
-)
-
-
 @st.fragment(run_every="5m")
 def exibir_dashboard() -> None:
+    # Renderizado dentro do fragment (e não no corpo do módulo) para que o
+    # horário mostrado acompanhe o auto-refresh a cada 5 minutos, em vez de
+    # ficar parado no horário do último carregamento completo da página.
+    badges_dashboard(
+        [
+            f"📅 {data_inicial.strftime('%d/%m/%Y')} a "
+            f"{data_final.strftime('%d/%m/%Y')}",
+            "🔄 Atualizado em "
+            f"{datetime.now().strftime('%d/%m/%Y às %H:%M')}",
+            "🟢 Bling conectado",
+        ]
+    )
+
     if atualizar:
         carregar_dataframe.clear()
 
@@ -953,8 +956,22 @@ def exibir_dashboard() -> None:
                 "\"Sincronizar itens do período selecionado\" acima."
             )
         else:
+            # itens_periodo["situacao_id"] é uma foto tirada no momento da
+            # sincronização e nunca é atualizada depois (sincronizar_itens_
+            # pedidos não reprocessa pedido já sincronizado). Se um pedido
+            # for cancelado (ou reativado) no Bling depois desse momento,
+            # aqui usamos a situação atual vinda de "df" em vez da foto
+            # antiga, para não divergir dos números por pedido.
+            situacao_atual_por_pedido = df.set_index("id")["situacao_id"]
+
+            situacao_atual_itens = (
+                itens_periodo["pedido_id"]
+                .map(situacao_atual_por_pedido)
+                .fillna(itens_periodo["situacao_id"])
+            )
+
             itens_validos = itens_periodo.loc[
-                ~itens_periodo["situacao_id"].isin(SITUACOES_CANCELADAS)
+                ~situacao_atual_itens.isin(SITUACOES_CANCELADAS)
             ].copy()
 
             itens_validos["total_item"] = (
@@ -1643,13 +1660,13 @@ def exibir_dashboard() -> None:
 
                 referencia_inicio_meta = coluna_data_1.date_input(
                     "Início do período",
-                    value=date.today(),
+                    value=hoje,
                     key="referencia_inicio_meta",
                 )
 
                 referencia_fim_meta = coluna_data_2.date_input(
                     "Fim do período",
-                    value=date.today(),
+                    value=hoje,
                     key="referencia_fim_meta",
                 )
 
