@@ -11,6 +11,7 @@ import streamlit as st
 
 from bling_core import (
     CANAL_CONTA_INTEIRA,
+    CONTA_MANUAL,
     CONTAS_BLING,
     NOMES_CONTA,
     SITUACOES_CANCELADAS,
@@ -1228,7 +1229,8 @@ def renderizar_tv() -> None:
             f"{pedidos_hoje} vendas válidas hoje",
             [
                 f"Atualizado às {agora.strftime('%H:%M')}",
-                "Bling conectado",
+                ", ".join(NOMES_CONTA.get(c, c) for c in contas_ativas)
+                + " conectado(s)",
                 (
                     "Sem vendas novas"
                     if pedidos_hoje == 0
@@ -1270,6 +1272,53 @@ def renderizar_tv() -> None:
                 f"Unidades vendidas: {unidades_vendidas_hoje:,.0f}".replace(",", "."),
             ],
             chip="Operação",
+            chip_tipo="neutral",
+        )
+    )
+
+    # Sempre lista as 3 contas (Marketplaces / Loja Oficial / B2B manual),
+    # mesmo quando só uma está conectada — assim dá pra distinguir "zerou
+    # hoje" de "essa conta ainda nem foi conectada".
+    faturamento_por_conta = (
+        pd.DataFrame({"conta": [*CONTAS_BLING, CONTA_MANUAL]})
+        .merge(
+            df_hoje.groupby("conta", as_index=False).agg(
+                faturamento=("total", "sum"),
+                pedidos=("id", "nunique"),
+            ),
+            on="conta",
+            how="left",
+        )
+    )
+    faturamento_por_conta["faturamento"] = faturamento_por_conta[
+        "faturamento"
+    ].fillna(0.0)
+    faturamento_por_conta["pedidos"] = (
+        faturamento_por_conta["pedidos"].fillna(0).astype(int)
+    )
+
+    def _linha_faturamento_conta(linha: pd.Series) -> str:
+        rotulo = NOMES_CONTA.get(linha["conta"], linha["conta"])
+        valor = moeda_br(float(linha["faturamento"]))
+
+        if linha["pedidos"]:
+            return f"{rotulo}: {valor} · {int(linha['pedidos'])} venda(s)"
+
+        if linha["conta"] == CONTA_MANUAL or linha["conta"] in contas_ativas:
+            return f"{rotulo}: {valor} · sem vendas hoje"
+
+        return f"{rotulo}: {valor} · Bling não conectado ainda"
+
+    cards.append(
+        card_tv_lista(
+            "Marketplace x Site Oficial x B2B",
+            moeda_br(faturamento_hoje),
+            "Faturamento de hoje, por conta",
+            [
+                _linha_faturamento_conta(linha)
+                for _, linha in faturamento_por_conta.iterrows()
+            ],
+            chip="Por conta",
             chip_tipo="neutral",
         )
     )
