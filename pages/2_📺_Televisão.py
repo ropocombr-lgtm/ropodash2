@@ -10,15 +10,18 @@ import pandas as pd
 import streamlit as st
 
 from bling_core import (
+    CONTAS_BLING,
+    NOMES_CONTA,
     SITUACOES_CANCELADAS,
     agora_sao_paulo,
     calcular_historico_diario,
-    carregar_dataframe,
+    canais_do_grupo,
+    carregar_dados_completos_multi,
+    contas_conectadas,
     gerar_url_autorizacao,
     ler_historico_diario,
     ler_itens_pedidos,
     ler_metas,
-    ler_tokens,
     moeda_br,
     montar_comparativo,
     nome_canal,
@@ -783,6 +786,7 @@ def realizado_periodo(
     historico: pd.DataFrame,
     inicio: date,
     fim: date,
+    conta: str | None = None,
     canal: str | None = None,
 ) -> float:
     if historico.empty:
@@ -790,10 +794,13 @@ def realizado_periodo(
 
     filtro = (historico["data"] >= inicio) & (historico["data"] <= fim)
 
-    if canal is not None:
-        from bling_core import canais_do_grupo
+    if conta is not None:
+        filtro = filtro & (historico["conta"] == conta)
 
-        filtro = filtro & historico["canal"].isin(canais_do_grupo(canal))
+    if canal is not None:
+        filtro = filtro & historico["canal"].isin(
+            canais_do_grupo(conta, canal)
+        )
 
     return float(historico.loc[filtro, "faturamento_valido"].sum())
 
@@ -836,19 +843,24 @@ def calcular_cards_metas(
             historico,
             hoje,
             hoje,
+            meta["conta"],
             meta["canal"],
         )
         realizado_semana = realizado_periodo(
             historico,
             inicio_semana_meta,
             hoje,
+            meta["conta"],
             meta["canal"],
         )
         atingimento_semana = (
             realizado_semana / meta_semanal if meta_semanal else None
         )
         status, status_tipo = status_por_razao(atingimento_semana)
-        titulo = meta["rotulo"] or nome_canal(meta["canal"])
+        titulo = meta["rotulo"] or (
+            f"{NOMES_CONTA.get(meta['conta'], meta['conta'])} · "
+            f"{nome_canal(meta['conta'], meta['canal'])}"
+        )
 
         meta_diaria_total += meta_diaria
         meta_semanal_total += meta_semanal
@@ -920,17 +932,22 @@ def renderizar_tv() -> None:
     inicio_mes = hoje.replace(day=1)
     inicio_busca = min(hoje - timedelta(days=13), inicio_mes)
 
-    if not ler_tokens():
-        st.warning("O dashboard ainda não está conectado ao Bling.")
-        st.link_button(
-            "Conectar ao Bling",
-            gerar_url_autorizacao(),
-            type="primary",
-        )
+    contas_ativas = contas_conectadas()
+
+    if not contas_ativas:
+        st.warning("O dashboard ainda não está conectado a nenhuma conta Bling.")
+        for conta in CONTAS_BLING:
+            st.link_button(
+                f"Conectar {NOMES_CONTA[conta]}",
+                gerar_url_autorizacao(conta),
+                type="primary",
+            )
         st.stop()
 
     with st.spinner("Atualizando dados da televisão..."):
-        df = carregar_dataframe(inicio_busca.isoformat(), hoje.isoformat())
+        df = carregar_dados_completos_multi(
+            contas_ativas, inicio_busca.isoformat(), hoje.isoformat()
+        )
 
     if df.empty:
         st.info("Nenhum pedido encontrado para exibir na televisão.")
@@ -1005,11 +1022,20 @@ def renderizar_tv() -> None:
     )
 
     receita_por_canal = (
-        df_hoje.assign(canal=lambda dados: dados["loja_id"].apply(nome_canal))
-        .groupby("canal", as_index=False)
+        df_hoje.assign(canal=df_hoje["loja_id"])
+        .groupby(["conta", "canal"], as_index=False)
         .agg(faturamento=("total", "sum"), pedidos=("id", "nunique"))
         .sort_values("faturamento", ascending=False)
     )
+
+    if not receita_por_canal.empty:
+        receita_por_canal["canal"] = receita_por_canal.apply(
+            lambda linha: (
+                f"{NOMES_CONTA.get(linha['conta'], linha['conta'])} · "
+                f"{nome_canal(linha['conta'], linha['canal'])}"
+            ),
+            axis=1,
+        )
 
     if not receita_por_canal.empty:
         receita_por_canal["ticket_medio"] = (
@@ -1072,7 +1098,13 @@ def renderizar_tv() -> None:
     baseline_historico = historico.loc[historico["data"] < hoje].copy()
 
     if not baseline_historico.empty:
-        baseline_historico["canal_nome"] = baseline_historico["canal"].apply(nome_canal)
+        baseline_historico["canal_nome"] = baseline_historico.apply(
+            lambda linha: (
+                f"{NOMES_CONTA.get(linha['conta'], linha['conta'])} · "
+                f"{nome_canal(linha['conta'], linha['canal'])}"
+            ),
+            axis=1,
+        )
         baseline_por_canal = (
             baseline_historico.groupby("canal_nome", as_index=False)
             .agg(faturamento_total=("faturamento_valido", "sum"))
@@ -1105,13 +1137,17 @@ def renderizar_tv() -> None:
         )
 
     ontem = hoje - timedelta(days=1)
-    df_ontem = carregar_dataframe(ontem.isoformat(), ontem.isoformat())
+    df_ontem = carregar_dados_completos_multi(
+        contas_ativas, ontem.isoformat(), ontem.isoformat()
+    )
     df_ontem_validos = df_ontem.loc[~df_ontem["situacao_id"].isin(SITUACOES_CANCELADAS)].copy()
     faturamento_ontem = float(df_ontem_validos["total"].sum())
     variacao_ontem = variacao_percentual(faturamento_hoje, faturamento_ontem)
 
     semana_passada = hoje - timedelta(days=7)
-    df_semana_passada = carregar_dataframe(semana_passada.isoformat(), semana_passada.isoformat())
+    df_semana_passada = carregar_dados_completos_multi(
+        contas_ativas, semana_passada.isoformat(), semana_passada.isoformat()
+    )
     df_semana_passada_validos = df_semana_passada.loc[~df_semana_passada["situacao_id"].isin(SITUACOES_CANCELADAS)].copy()
     faturamento_semana_passada = float(df_semana_passada_validos["total"].sum())
     variacao_semana_passada = variacao_percentual(faturamento_hoje, faturamento_semana_passada)
@@ -1356,7 +1392,10 @@ def renderizar_tv() -> None:
     if not metas_ativas.empty:
         linhas_metas = []
         for _, linha in metas_ativas.head(3).iterrows():
-            titulo = linha["rotulo"] or nome_canal(linha["canal"])
+            titulo = linha["rotulo"] or (
+                f"{NOMES_CONTA.get(linha['conta'], linha['conta'])} · "
+                f"{nome_canal(linha['conta'], linha['canal'])}"
+            )
             atingido = float(linha["atingido"]) if pd.notna(linha["atingido"]) else 0.0
             status, status_tipo = status_por_razao(atingido)
             linhas_metas.append(
@@ -1566,7 +1605,7 @@ def renderizar_tv() -> None:
                 f"{linha['data'].strftime('%H:%M')} · " if horario_disponivel else ""
             )
             linhas_ultimas.append(
-                f"{prefixo_horario}{nome_canal(linha['loja_id'])} · {moeda_br(float(linha['total']))} · {mascara_cliente(linha['cliente'])}"
+                f"{prefixo_horario}{nome_canal(linha['conta'], linha['loja_id'])} · {moeda_br(float(linha['total']))} · {mascara_cliente(linha['cliente'])}"
             )
         cards.append(
             card_tv_lista(
