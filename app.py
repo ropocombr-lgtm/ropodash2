@@ -8,6 +8,8 @@ import plotly.express as px
 import streamlit as st
 
 from bling_core import (
+    CANAL_CONTA_INTEIRA,
+    CONTA_MANUAL,
     CONTAS_BLING,
     GRUPOS_CANAL,
     NOMES_CONTA,
@@ -19,6 +21,7 @@ from bling_core import (
     carregar_pedidos_manuais,
     contas_conectadas,
     excluir_meta,
+    excluir_todas_metas,
     gerar_url_autorizacao,
     hoje_sao_paulo,
     ler_historico_diario,
@@ -1724,15 +1727,21 @@ def exibir_dashboard() -> None:
             # Fora do st.form: widgets dentro de um form só reprocessam no
             # submit, então a conta precisa ficar fora para que a lista de
             # canais abaixo já apareça filtrada pela conta escolhida.
+            #
+            # As 3 contas ficam sempre disponíveis aqui (Marketplaces, Loja
+            # Oficial e B2B manual), mesmo que a conta ainda não esteja
+            # conectada ao Bling — permite já cadastrar a meta antes de
+            # conectar (ex.: Loja Oficial) ou antes de existir pedido B2B
+            # algum ainda.
             conta_meta = st.selectbox(
                 "Conta",
-                options=contas_selecionadas,
+                options=[*CONTAS_BLING, CONTA_MANUAL],
                 format_func=lambda conta: NOMES_CONTA.get(conta, conta),
                 key="conta_meta",
             )
 
             with st.form("form_meta"):
-                canais_disponiveis = sorted(
+                canais_disponiveis = [CANAL_CONTA_INTEIRA] + sorted(
                     df_validos.loc[df_validos["conta"] == conta_meta, "loja_id"]
                     .dropna()
                     .astype(str)
@@ -1741,7 +1750,7 @@ def exibir_dashboard() -> None:
 
                 canal_meta = st.selectbox(
                     "Canal",
-                    options=canais_disponiveis or ["Sem canal"],
+                    options=canais_disponiveis,
                     format_func=lambda canal: nome_canal(conta_meta, canal),
                 )
 
@@ -1813,6 +1822,21 @@ def exibir_dashboard() -> None:
                 if st.button("Excluir meta selecionada"):
                     excluir_meta(opcoes_exclusao[escolha_exclusao])
                     st.success("Meta excluída.")
+                    st.rerun()
+
+                st.divider()
+
+                confirmar_limpeza = st.checkbox(
+                    "Confirmo que quero excluir TODAS as metas cadastradas "
+                    "(ação não pode ser desfeita)."
+                )
+
+                if st.button(
+                    "Excluir todas as metas",
+                    disabled=not confirmar_limpeza,
+                ):
+                    excluir_todas_metas()
+                    st.success("Todas as metas foram excluídas.")
                     st.rerun()
 
 

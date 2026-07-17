@@ -92,6 +92,15 @@ def canais_do_grupo(conta: str, canal: str) -> list[str]:
     return GRUPOS_CANAL.get(conta, {}).get(canal, [canal])
 
 
+# Valor especial de "canal" pra uma meta cobrir a conta inteira (todos os
+# canais, incluindo os que ainda não existem hoje), em vez de um único
+# canal ou grupo fixo de canais. Não é um loja_id nem precisa estar em
+# NOMES_CANAL_CONHECIDOS/GRUPOS_CANAL — nome_canal já devolve qualquer
+# texto que não seja dígito puro, então nenhuma outra mudança é necessária
+# pra exibir esse rótulo.
+CANAL_CONTA_INTEIRA = "Conta inteira"
+
+
 def nome_situacao(situacao_id: int | None) -> str:
     if situacao_id is None:
         return "Não informada"
@@ -1001,6 +1010,10 @@ def excluir_meta(meta_id: int) -> None:
     supabase.table("metas").delete().eq("id", meta_id).execute()
 
 
+def excluir_todas_metas() -> None:
+    supabase.table("metas").delete().gte("id", 0).execute()
+
+
 def calcular_realizado_meta(
     historico: pd.DataFrame,
     conta: str,
@@ -1011,14 +1024,15 @@ def calcular_realizado_meta(
     if historico.empty:
         return 0.0
 
-    lojas = canais_do_grupo(conta, canal)
-
     filtro = (
         (historico["conta"] == conta)
-        & historico["canal"].isin(lojas)
         & (historico["data"] >= referencia_inicio)
         & (historico["data"] <= referencia_fim)
     )
+
+    if canal != CANAL_CONTA_INTEIRA:
+        lojas = canais_do_grupo(conta, canal)
+        filtro = filtro & historico["canal"].isin(lojas)
 
     return float(historico.loc[filtro, "faturamento_valido"].sum())
 

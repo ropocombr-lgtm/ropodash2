@@ -10,6 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from bling_core import (
+    CANAL_CONTA_INTEIRA,
     CONTAS_BLING,
     NOMES_CONTA,
     SITUACOES_CANCELADAS,
@@ -797,7 +798,7 @@ def realizado_periodo(
     if conta is not None:
         filtro = filtro & (historico["conta"] == conta)
 
-    if canal is not None:
+    if canal is not None and canal != CANAL_CONTA_INTEIRA:
         filtro = filtro & historico["canal"].isin(
             canais_do_grupo(conta, canal)
         )
