@@ -8,32 +8,25 @@ import plotly.express as px
 import streamlit as st
 
 from bling_core import (
-    CANAL_CONTA_INTEIRA,
-    CONTA_MANUAL,
-    CONTAS_BLING,
     GRUPOS_CANAL,
-    NOMES_CONTA,
     SITUACOES_CANCELADAS,
     calcular_historico_diario,
     carregar_dataframe,
-    carregar_dados_completos_multi,
-    carregar_historico_completo_multi,
-    carregar_pedidos_manuais,
-    contas_conectadas,
+    carregar_historico_completo,
     excluir_meta,
-    excluir_todas_metas,
     gerar_url_autorizacao,
     hoje_sao_paulo,
     ler_historico_diario,
     ler_itens_pedidos,
     ler_metas,
+    ler_tokens,
     moeda_br,
     montar_comparativo,
     nome_canal,
     processar_callback_oauth,
     salvar_historico_diario,
     salvar_meta,
-    sincronizar_itens_pedidos_multi,
+    sincronizar_itens_pedidos,
 )
 from ui import (
     ALTURA_GRAFICO_PRINCIPAL,
@@ -103,30 +96,18 @@ cabecalho_dashboard(
     "Acompanhamento de vendas, canais, produtos, metas e projeções.",
 )
 
-contas_ativas = contas_conectadas()
+tokens_existentes = ler_tokens()
 
-if not contas_ativas:
-    st.warning("O dashboard ainda não está conectado a nenhuma conta Bling.")
+if not tokens_existentes:
+    st.warning("O dashboard ainda não está conectado ao Bling.")
 
-    for conta in CONTAS_BLING:
-        st.link_button(
-            f"Conectar {NOMES_CONTA[conta]}",
-            gerar_url_autorizacao(conta),
-            type="primary",
-        )
+    st.link_button(
+        "Conectar ao Bling",
+        gerar_url_autorizacao(),
+        type="primary",
+    )
 
     st.stop()
-
-contas_faltando = [conta for conta in CONTAS_BLING if conta not in contas_ativas]
-
-if contas_faltando:
-    st.info(
-        "Conectado: "
-        + ", ".join(NOMES_CONTA[conta] for conta in contas_ativas)
-        + ". Ainda falta conectar: "
-        + ", ".join(NOMES_CONTA[conta] for conta in contas_faltando)
-        + "."
-    )
 
 
 with st.sidebar:
@@ -148,17 +129,6 @@ with st.sidebar:
         st.error("A data inicial não pode ser posterior à data final.")
         st.stop()
 
-    contas_selecionadas = st.multiselect(
-        "Conta",
-        options=contas_ativas,
-        default=contas_ativas,
-        format_func=lambda conta: NOMES_CONTA.get(conta, conta),
-    )
-
-    if not contas_selecionadas:
-        st.error("Selecione ao menos uma conta para ver o dashboard.")
-        st.stop()
-
     atualizar = st.button(
         "Atualizar agora",
         use_container_width=True,
@@ -166,14 +136,14 @@ with st.sidebar:
 
     st.divider()
 
-    st.caption("Conectar / reconectar contas")
-
-    for conta in CONTAS_BLING:
+    if st.button(
+        "Reconectar ao Bling",
+        use_container_width=True,
+    ):
         st.link_button(
-            f"{'Reconectar' if conta in contas_ativas else 'Conectar'} "
-            f"{NOMES_CONTA[conta]}",
-            gerar_url_autorizacao(conta),
-            use_container_width=True,
+            "Autorizar novamente",
+            gerar_url_autorizacao(),
+            type="primary",
         )
 
 
@@ -188,19 +158,15 @@ def exibir_dashboard() -> None:
             f"{data_final.strftime('%d/%m/%Y')}",
             "🔄 Atualizado em "
             f"{datetime.now().strftime('%d/%m/%Y às %H:%M')}",
-            "🟢 "
-            + ", ".join(NOMES_CONTA[conta] for conta in contas_selecionadas)
-            + " conectado(s)",
+            "🟢 Bling conectado",
         ]
     )
 
     if atualizar:
         carregar_dataframe.clear()
-        carregar_pedidos_manuais.clear()
 
     with st.spinner("Consultando os dados do Bling..."):
-        df = carregar_dados_completos_multi(
-            contas_selecionadas,
+        df = carregar_dataframe(
             data_inicial.isoformat(),
             data_final.isoformat(),
         )
@@ -264,10 +230,7 @@ def exibir_dashboard() -> None:
                     with coluna_pacing:
                         card_meta(
                             linha_meta["rotulo"]
-                            or (
-                                f"{NOMES_CONTA.get(linha_meta['conta'], linha_meta['conta'])} · "
-                                f"{nome_canal(linha_meta['conta'], linha_meta['canal'])}"
-                            ),
+                            or nome_canal(linha_meta["canal"]),
                             linha_meta["realizado"],
                             linha_meta["meta"],
                             linha_meta["classificacao"],
@@ -291,14 +254,12 @@ def exibir_dashboard() -> None:
         ano_anterior_inicial = data_inicial - timedelta(days=365)
         ano_anterior_final = data_final - timedelta(days=365)
 
-        df_periodo_anterior = carregar_dados_completos_multi(
-            contas_selecionadas,
+        df_periodo_anterior = carregar_dataframe(
             periodo_anterior_inicial.isoformat(),
             periodo_anterior_final.isoformat(),
         )
 
-        df_ano_anterior = carregar_dados_completos_multi(
-            contas_selecionadas,
+        df_ano_anterior = carregar_dataframe(
             ano_anterior_inicial.isoformat(),
             ano_anterior_final.isoformat(),
         )
@@ -484,8 +445,7 @@ def exibir_dashboard() -> None:
 
         inicio_mes_atual = hoje.replace(day=1)
 
-        df_mes_atual = carregar_dados_completos_multi(
-            contas_selecionadas,
+        df_mes_atual = carregar_dataframe(
             inicio_mes_atual.isoformat(),
             hoje.isoformat(),
         )
@@ -587,21 +547,15 @@ def exibir_dashboard() -> None:
         )
 
         receita_por_canal = (
-            df_validos.assign(canal=df_validos["loja_id"])
-            .groupby(["conta", "canal"], as_index=False)
+            df_validos.assign(
+                canal=lambda d: d["loja_id"].apply(nome_canal)
+            )
+            .groupby("canal", as_index=False)
             .agg(
                 faturamento=("total", "sum"),
                 pedidos=("id", "nunique"),
             )
             .sort_values("faturamento", ascending=False)
-        )
-
-        receita_por_canal["canal"] = receita_por_canal.apply(
-            lambda linha: (
-                f"{NOMES_CONTA.get(linha['conta'], linha['conta'])} · "
-                f"{nome_canal(linha['conta'], linha['canal'])}"
-            ),
-            axis=1,
         )
 
         receita_por_canal["ticket_medio"] = (
@@ -623,23 +577,9 @@ def exibir_dashboard() -> None:
                         SITUACOES_CANCELADAS
                     )
                 ]
-                .assign(canal=lambda d: d["loja_id"])
-                .groupby(["conta", "canal"], as_index=False)
+                .assign(canal=lambda d: d["loja_id"].apply(nome_canal))
+                .groupby("canal", as_index=False)
                 .agg(faturamento_anterior=("total", "sum"))
-            )
-
-            faturamento_anterior_por_canal["canal"] = (
-                faturamento_anterior_por_canal.apply(
-                    lambda linha: (
-                        f"{NOMES_CONTA.get(linha['conta'], linha['conta'])} · "
-                        f"{nome_canal(linha['conta'], linha['canal'])}"
-                    ),
-                    axis=1,
-                )
-            )
-
-            faturamento_anterior_por_canal = (
-                faturamento_anterior_por_canal.drop(columns=["conta"])
             )
 
             receita_por_canal = receita_por_canal.merge(
@@ -684,23 +624,13 @@ def exibir_dashboard() -> None:
             with coluna_cancelamento_canal:
                 cancelamento_por_canal = (
                     df.assign(
-                        canal=df["loja_id"],
+                        canal=lambda d: d["loja_id"].apply(nome_canal),
                         cancelado=cancelados,
                     )
-                    .groupby(["conta", "canal"], as_index=False)
+                    .groupby("canal", as_index=False)
                     .agg(
                         total_pedidos=("id", "nunique"),
                         cancelados=("cancelado", "sum"),
-                    )
-                )
-
-                cancelamento_por_canal["canal"] = (
-                    cancelamento_por_canal.apply(
-                        lambda linha: (
-                            f"{NOMES_CONTA.get(linha['conta'], linha['conta'])} · "
-                            f"{nome_canal(linha['conta'], linha['canal'])}"
-                        ),
-                        axis=1,
                     )
                 )
 
@@ -841,8 +771,7 @@ def exibir_dashboard() -> None:
             "👥",
         )
 
-        historico_completo = carregar_historico_completo_multi(
-            contas_selecionadas,
+        historico_completo = carregar_historico_completo(
             data_final.isoformat(),
             3,
         )
@@ -1010,7 +939,7 @@ def exibir_dashboard() -> None:
                     if total:
                         barra.progress(atual / total)
 
-                novos = sincronizar_itens_pedidos_multi(
+                novos = sincronizar_itens_pedidos(
                     df,
                     progresso=_atualizar_barra,
                 )
@@ -1507,13 +1436,9 @@ def exibir_dashboard() -> None:
                     >= (hoje_pred - timedelta(days=60))
                 ].copy()
 
-                historico_recente["canal_nome"] = historico_recente.apply(
-                    lambda linha: (
-                        f"{NOMES_CONTA.get(linha['conta'], linha['conta'])} · "
-                        f"{nome_canal(linha['conta'], linha['canal'])}"
-                    ),
-                    axis=1,
-                )
+                historico_recente["canal_nome"] = historico_recente[
+                    "canal"
+                ].apply(nome_canal)
 
                 grafico_canal_tendencia = px.line(
                     historico_recente.sort_values("data"),
@@ -1613,9 +1538,8 @@ def exibir_dashboard() -> None:
                     colunas_meta, linhas_card[inicio : inicio + 3]
                 ):
                     with coluna_meta:
-                        rotulo_exibido = linha["rotulo"] or (
-                            f"{NOMES_CONTA.get(linha['conta'], linha['conta'])} · "
-                            f"{nome_canal(linha['conta'], linha['canal'])}"
+                        rotulo_exibido = (
+                            linha["rotulo"] or nome_canal(linha["canal"])
                         )
 
                         card_meta(
@@ -1638,14 +1562,9 @@ def exibir_dashboard() -> None:
 
             tabela_comparativo = comparativo.copy()
 
-            tabela_comparativo["canal"] = tabela_comparativo.apply(
-                lambda linha: nome_canal(linha["conta"], linha["canal"]),
-                axis=1,
-            )
-
-            tabela_comparativo["conta"] = tabela_comparativo["conta"].map(
-                lambda conta: NOMES_CONTA.get(conta, conta)
-            )
+            tabela_comparativo["canal"] = tabela_comparativo[
+                "canal"
+            ].apply(nome_canal)
 
             tabela_comparativo["periodo"] = (
                 tabela_comparativo["referencia_inicio"].apply(
@@ -1688,7 +1607,6 @@ def exibir_dashboard() -> None:
                 st.dataframe(
                     tabela_comparativo.rename(
                         columns={
-                            "conta": "Conta",
                             "canal": "Canal",
                             "rotulo": "Rótulo",
                             "periodo": "Período",
@@ -1702,7 +1620,6 @@ def exibir_dashboard() -> None:
                         }
                     )[
                         [
-                            "Conta",
                             "Canal",
                             "Rótulo",
                             "Período",
@@ -1724,34 +1641,15 @@ def exibir_dashboard() -> None:
         coluna_form, coluna_excluir = st.columns(2)
 
         with coluna_form, st.expander("Cadastrar meta", expanded=True):
-            # Fora do st.form: widgets dentro de um form só reprocessam no
-            # submit, então a conta precisa ficar fora para que a lista de
-            # canais abaixo já apareça filtrada pela conta escolhida.
-            #
-            # As 3 contas ficam sempre disponíveis aqui (Marketplaces, Loja
-            # Oficial e B2B manual), mesmo que a conta ainda não esteja
-            # conectada ao Bling — permite já cadastrar a meta antes de
-            # conectar (ex.: Loja Oficial) ou antes de existir pedido B2B
-            # algum ainda.
-            conta_meta = st.selectbox(
-                "Conta",
-                options=[*CONTAS_BLING, CONTA_MANUAL],
-                format_func=lambda conta: NOMES_CONTA.get(conta, conta),
-                key="conta_meta",
-            )
-
             with st.form("form_meta"):
-                canais_disponiveis = [CANAL_CONTA_INTEIRA] + sorted(
-                    df_validos.loc[df_validos["conta"] == conta_meta, "loja_id"]
-                    .dropna()
-                    .astype(str)
-                    .unique()
-                ) + list(GRUPOS_CANAL.get(conta_meta, {}).keys())
+                canais_disponiveis = sorted(
+                    df_validos["loja_id"].dropna().astype(str).unique()
+                ) + list(GRUPOS_CANAL.keys())
 
                 canal_meta = st.selectbox(
                     "Canal",
-                    options=canais_disponiveis,
-                    format_func=lambda canal: nome_canal(conta_meta, canal),
+                    options=canais_disponiveis or ["Sem canal"],
+                    format_func=nome_canal,
                 )
 
                 rotulo_meta = st.text_input(
@@ -1788,7 +1686,6 @@ def exibir_dashboard() -> None:
                         )
                     else:
                         salvar_meta(
-                            conta_meta,
                             canal_meta,
                             referencia_inicio_meta,
                             referencia_fim_meta,
@@ -1805,8 +1702,7 @@ def exibir_dashboard() -> None:
             else:
                 opcoes_exclusao = {
                     (
-                        f"{NOMES_CONTA.get(linha['conta'], linha['conta'])} · "
-                        f"{nome_canal(linha['conta'], linha['canal'])} — "
+                        f"{nome_canal(linha['canal'])} — "
                         f"{linha['referencia_inicio'].strftime('%d/%m')} "
                         f"a {linha['referencia_fim'].strftime('%d/%m/%Y')}"
                         + (f" ({linha['rotulo']})" if linha["rotulo"] else "")
@@ -1822,21 +1718,6 @@ def exibir_dashboard() -> None:
                 if st.button("Excluir meta selecionada"):
                     excluir_meta(opcoes_exclusao[escolha_exclusao])
                     st.success("Meta excluída.")
-                    st.rerun()
-
-                st.divider()
-
-                confirmar_limpeza = st.checkbox(
-                    "Confirmo que quero excluir TODAS as metas cadastradas "
-                    "(ação não pode ser desfeita)."
-                )
-
-                if st.button(
-                    "Excluir todas as metas",
-                    disabled=not confirmar_limpeza,
-                ):
-                    excluir_todas_metas()
-                    st.success("Todas as metas foram excluídas.")
                     st.rerun()
 
 

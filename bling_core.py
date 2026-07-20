@@ -18,24 +18,7 @@ AUTHORIZE_URL = "https://www.bling.com.br/Api/v3/oauth/authorize"
 TOKEN_URL = "https://api.bling.com.br/Api/v3/oauth/token"
 API_BASE_URL = "https://api.bling.com.br/Api/v3"
 
-# Contas Bling conectadas neste dashboard. Cada uma tem seu próprio app
-# OAuth (client_id/client_secret/redirect_uri, configurados em
-# st.secrets["bling"][conta]) e seu próprio conjunto de tokens — os
-# pedido_id/item_id do Bling são internos de cada conta e podem colidir
-# entre elas, por isso "conta" é parte da chave em toda tabela que guarda
-# pedido/item.
-CONTAS_BLING = ["marketplaces", "loja_oficial"]
-
-NOMES_CONTA = {
-    "marketplaces": "Marketplaces",
-    "loja_oficial": "Loja Oficial",
-    "manual": "B2B Manual",
-}
-
-# Pseudo-conta usada pelos pedidos de B2B cadastrados manualmente (não vêm
-# do Bling, então não tem OAuth nem client_id/secret em st.secrets — por
-# isso fica de fora de CONTAS_BLING).
-CONTA_MANUAL = "manual"
+TOKEN_ROW_ID = 1
 
 # IDs de situação confirmados manualmente no Bling do cliente (a API não
 # expõe o nome da situação sem o escopo "Situações", que este app não tem).
@@ -47,58 +30,37 @@ NOMES_SITUACAO_CONHECIDAS = {
 }
 
 # Mapeamento manual: a API não expõe nome de canal sem o escopo
-# "Canais de venda", que este app não tem (exigiria reautorizar). Aninhado
-# por conta porque o mesmo número de loja_id pode existir em contas Bling
-# diferentes sem ser o mesmo canal.
-NOMES_CANAL_CONHECIDOS: dict[str, dict[str, str]] = {
-    "marketplaces": {
-        "205971033": "Amazon",
-        "205939074": "Shopee",
-        "205971561": "Mercado Livre",
-    },
-    "loja_oficial": {},
+# "Canais de venda", que este app não tem (exigiria reautorizar).
+NOMES_CANAL_CONHECIDOS = {
+    "205971033": "Amazon",
+    "205939074": "Shopee",
+    "205971561": "Mercado Livre",
 }
 
 # Agrupamentos usados para metas que cobrem mais de um canal ao mesmo
 # tempo (ex.: uma meta única de "Marketplace" para Shopee + Mercado Livre).
-# Também aninhado por conta — agrupar canais de contas diferentes numa
-# mesma meta não é suportado hoje.
-GRUPOS_CANAL: dict[str, dict[str, list[str]]] = {
-    "marketplaces": {
-        "Marketplace": ["205939074", "205971561"],
-    },
-    "loja_oficial": {},
+GRUPOS_CANAL: dict[str, list[str]] = {
+    "Marketplace": ["205939074", "205971561"],
 }
 
 
-def nome_canal(conta: str, loja_id: Any) -> str:
+def nome_canal(loja_id: Any) -> str:
     if loja_id is None:
         return "Sem canal"
 
     chave = str(loja_id)
-    nomes_conhecidos = NOMES_CANAL_CONHECIDOS.get(conta, {})
-    grupos = GRUPOS_CANAL.get(conta, {})
 
-    if chave in nomes_conhecidos:
-        return nomes_conhecidos[chave]
+    if chave in NOMES_CANAL_CONHECIDOS:
+        return NOMES_CANAL_CONHECIDOS[chave]
 
-    if chave in grupos or not chave.isdigit():
+    if chave in GRUPOS_CANAL or not chave.isdigit():
         return chave
 
     return f"Canal {chave}"
 
 
-def canais_do_grupo(conta: str, canal: str) -> list[str]:
-    return GRUPOS_CANAL.get(conta, {}).get(canal, [canal])
-
-
-# Valor especial de "canal" pra uma meta cobrir a conta inteira (todos os
-# canais, incluindo os que ainda não existem hoje), em vez de um único
-# canal ou grupo fixo de canais. Não é um loja_id nem precisa estar em
-# NOMES_CANAL_CONHECIDOS/GRUPOS_CANAL — nome_canal já devolve qualquer
-# texto que não seja dígito puro, então nenhuma outra mudança é necessária
-# pra exibir esse rótulo.
-CANAL_CONTA_INTEIRA = "Conta inteira"
+def canais_do_grupo(canal: str) -> list[str]:
+    return GRUPOS_CANAL.get(canal, [canal])
 
 
 def nome_situacao(situacao_id: int | None) -> str:
@@ -130,19 +92,12 @@ def hoje_sao_paulo() -> date:
 # SEGREDOS
 # =========================================================
 
-def carregar_configuracoes() -> dict[str, Any]:
+def carregar_configuracoes() -> dict[str, str]:
     try:
-        bling_contas = {
-            conta: {
-                "client_id": st.secrets["bling"][conta]["client_id"],
-                "client_secret": st.secrets["bling"][conta]["client_secret"],
-                "redirect_uri": st.secrets["bling"][conta]["redirect_uri"],
-            }
-            for conta in CONTAS_BLING
-        }
-
         return {
-            "bling": bling_contas,
+            "client_id": st.secrets["bling"]["client_id"],
+            "client_secret": st.secrets["bling"]["client_secret"],
+            "redirect_uri": st.secrets["bling"]["redirect_uri"],
             "supabase_url": st.secrets["supabase"]["url"],
             "supabase_key": st.secrets["supabase"]["service_role_key"],
         }
@@ -173,11 +128,11 @@ def conectar_supabase() -> Client:
 supabase = conectar_supabase()
 
 
-def ler_tokens(conta: str) -> dict[str, Any] | None:
+def ler_tokens() -> dict[str, Any] | None:
     resposta = (
         supabase.table("bling_tokens")
         .select("*")
-        .eq("conta", conta)
+        .eq("id", TOKEN_ROW_ID)
         .limit(1)
         .execute()
     )
@@ -188,7 +143,7 @@ def ler_tokens(conta: str) -> dict[str, Any] | None:
     return resposta.data[0]
 
 
-def salvar_tokens(conta: str, tokens: dict[str, Any]) -> None:
+def salvar_tokens(tokens: dict[str, Any]) -> None:
     expires_in = int(tokens.get("expires_in", 3600))
 
     # Renova um pouco antes do vencimento real.
@@ -198,7 +153,7 @@ def salvar_tokens(conta: str, tokens: dict[str, Any]) -> None:
     )
 
     registro = {
-        "conta": conta,
+        "id": TOKEN_ROW_ID,
         "access_token": tokens["access_token"],
         "refresh_token": tokens["refresh_token"],
         "expires_at": expires_at.isoformat(),
@@ -207,66 +162,55 @@ def salvar_tokens(conta: str, tokens: dict[str, Any]) -> None:
 
     (
         supabase.table("bling_tokens")
-        .upsert(registro, on_conflict="conta")
+        .upsert(registro, on_conflict="id")
         .execute()
     )
-
-
-def contas_conectadas() -> list[str]:
-    return [conta for conta in CONTAS_BLING if ler_tokens(conta) is not None]
 
 
 # =========================================================
 # PROTEÇÃO DO OAUTH STATE
 # =========================================================
 
-def criar_oauth_state(conta: str) -> str:
+def criar_oauth_state() -> str:
     timestamp = str(int(time.time()))
-    segredo = CONFIG["bling"][conta]["client_secret"]
 
     assinatura = hmac.new(
-        segredo.encode("utf-8"),
-        f"{conta}.{timestamp}".encode("utf-8"),
+        CONFIG["client_secret"].encode("utf-8"),
+        timestamp.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
 
-    return f"{conta}.{timestamp}.{assinatura}"
+    return f"{timestamp}.{assinatura}"
 
 
-def validar_oauth_state(state: str, validade_segundos: int = 600) -> str | None:
+def validar_oauth_state(state: str, validade_segundos: int = 600) -> bool:
     try:
-        conta, timestamp, assinatura_recebida = state.split(".", maxsplit=2)
-
-        if conta not in CONFIG["bling"]:
-            return None
-
+        timestamp, assinatura_recebida = state.split(".", maxsplit=1)
         momento = int(timestamp)
 
         if abs(int(time.time()) - momento) > validade_segundos:
-            return None
-
-        segredo = CONFIG["bling"][conta]["client_secret"]
+            return False
 
         assinatura_esperada = hmac.new(
-            segredo.encode("utf-8"),
-            f"{conta}.{timestamp}".encode("utf-8"),
+            CONFIG["client_secret"].encode("utf-8"),
+            timestamp.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
 
-        if not hmac.compare_digest(assinatura_recebida, assinatura_esperada):
-            return None
-
-        return conta
+        return hmac.compare_digest(
+            assinatura_recebida,
+            assinatura_esperada,
+        )
 
     except (ValueError, AttributeError):
-        return None
+        return False
 
 
-def gerar_url_autorizacao(conta: str) -> str:
+def gerar_url_autorizacao() -> str:
     parametros = {
         "response_type": "code",
-        "client_id": CONFIG["bling"][conta]["client_id"],
-        "state": criar_oauth_state(conta),
+        "client_id": CONFIG["client_id"],
+        "state": criar_oauth_state(),
     }
 
     return f"{AUTHORIZE_URL}?{urlencode(parametros)}"
@@ -276,13 +220,13 @@ def gerar_url_autorizacao(conta: str) -> str:
 # TOKENS DO BLING
 # =========================================================
 
-def solicitar_token(conta: str, dados: dict[str, str]) -> dict[str, Any]:
+def solicitar_token(dados: dict[str, str]) -> dict[str, Any]:
     resposta = requests.post(
         TOKEN_URL,
         data=dados,
         auth=(
-            CONFIG["bling"][conta]["client_id"],
-            CONFIG["bling"][conta]["client_secret"],
+            CONFIG["client_id"],
+            CONFIG["client_secret"],
         ),
         headers={
             "Accept": "application/json",
@@ -301,28 +245,26 @@ def solicitar_token(conta: str, dados: dict[str, str]) -> dict[str, Any]:
     return resposta.json()
 
 
-def trocar_codigo_por_token(conta: str, code: str) -> None:
+def trocar_codigo_por_token(code: str) -> None:
     tokens = solicitar_token(
-        conta,
         {
             "grant_type": "authorization_code",
             "code": code,
-        },
+        }
     )
 
-    salvar_tokens(conta, tokens)
+    salvar_tokens(tokens)
 
 
-def renovar_access_token(conta: str, refresh_token: str) -> str:
+def renovar_access_token(refresh_token: str) -> str:
     tokens = solicitar_token(
-        conta,
         {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
-        },
+        }
     )
 
-    salvar_tokens(conta, tokens)
+    salvar_tokens(tokens)
 
     return tokens["access_token"]
 
@@ -331,14 +273,11 @@ def interpretar_data_iso(valor: str) -> datetime:
     return datetime.fromisoformat(valor.replace("Z", "+00:00"))
 
 
-def obter_access_token(conta: str, forcar_renovacao: bool = False) -> str:
-    tokens = ler_tokens(conta)
+def obter_access_token(forcar_renovacao: bool = False) -> str:
+    tokens = ler_tokens()
 
     if not tokens:
-        raise RuntimeError(
-            f"A conta \"{NOMES_CONTA.get(conta, conta)}\" ainda não foi "
-            "conectada ao Bling."
-        )
+        raise RuntimeError("O dashboard ainda não foi conectado ao Bling.")
 
     expires_at = interpretar_data_iso(tokens["expires_at"])
     agora = datetime.now(timezone.utc)
@@ -349,14 +288,14 @@ def obter_access_token(conta: str, forcar_renovacao: bool = False) -> str:
         return tokens["access_token"]
 
     try:
-        return renovar_access_token(conta, tokens["refresh_token"])
+        return renovar_access_token(tokens["refresh_token"])
     except RuntimeError:
         # Várias páginas (dashboard, tempo real, televisão) renovam o mesmo
         # token compartilhado sem trava. Se outra sessão já rotacionou o
         # refresh_token entre a leitura acima e esta chamada, esta tentativa
         # falha; antes de propagar o erro, relê o banco — se outra sessão já
         # salvou um token válido nesse meio-tempo, usamos ele.
-        tokens_atuais = ler_tokens(conta)
+        tokens_atuais = ler_tokens()
 
         if tokens_atuais:
             expires_at_atual = interpretar_data_iso(tokens_atuais["expires_at"])
@@ -384,22 +323,18 @@ def processar_callback_oauth() -> None:
     if not code:
         return
 
-    conta = validar_oauth_state(state) if state else None
-
-    if conta is None:
+    if not state or not validar_oauth_state(state):
         st.error("A validação de segurança da conexão falhou.")
         st.query_params.clear()
         st.stop()
 
     try:
-        trocar_codigo_por_token(conta, code)
+        trocar_codigo_por_token(code)
 
         # Impede que o mesmo authorization code seja usado novamente.
         st.query_params.clear()
 
-        st.success(
-            f"Bling ({NOMES_CONTA.get(conta, conta)}) conectado com sucesso."
-        )
+        st.success("Bling conectado com sucesso.")
         st.rerun()
 
     except Exception as erro_callback:
@@ -416,11 +351,10 @@ MAX_TENTATIVAS_429 = 6
 
 
 def consultar_bling(
-    conta: str,
     endpoint: str,
     parametros: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    access_token = obter_access_token(conta)
+    access_token = obter_access_token()
 
     tentativa_auth_usada = False
     tentativas_429 = 0
@@ -439,7 +373,7 @@ def consultar_bling(
 
         if resposta.status_code == 401 and not tentativa_auth_usada:
             tentativa_auth_usada = True
-            access_token = obter_access_token(conta, forcar_renovacao=True)
+            access_token = obter_access_token(forcar_renovacao=True)
             continue
 
         if resposta.status_code == 429:
@@ -469,7 +403,6 @@ def consultar_bling(
 
 
 def buscar_pedidos(
-    conta: str,
     data_inicial: date,
     data_final: date,
 ) -> list[dict[str, Any]]:
@@ -478,7 +411,6 @@ def buscar_pedidos(
 
     while True:
         resposta = consultar_bling(
-            conta,
             "/pedidos/vendas",
             {
                 "dataInicial": data_inicial.isoformat(),
@@ -512,7 +444,6 @@ def buscar_pedidos(
 
 def transformar_pedidos(
     pedidos: list[dict[str, Any]],
-    conta: str,
 ) -> pd.DataFrame:
     registros = []
 
@@ -526,7 +457,6 @@ def transformar_pedidos(
         registros.append(
             {
                 "id": pedido.get("id"),
-                "conta": conta,
                 "numero": pedido.get("numero"),
                 "data": pedido.get("data"),
                 "cliente_id": contato.get("id"),
@@ -564,40 +494,19 @@ def transformar_pedidos(
 
 @st.cache_data(ttl=300, show_spinner=False)
 def carregar_dataframe(
-    conta: str,
     data_inicial_iso: str,
     data_final_iso: str,
 ) -> pd.DataFrame:
     pedidos = buscar_pedidos(
-        conta,
         date.fromisoformat(data_inicial_iso),
         date.fromisoformat(data_final_iso),
     )
 
-    return transformar_pedidos(pedidos, conta)
-
-
-def carregar_dataframe_multi(
-    contas: list[str],
-    data_inicial_iso: str,
-    data_final_iso: str,
-) -> pd.DataFrame:
-    partes = [
-        carregar_dataframe(conta, data_inicial_iso, data_final_iso)
-        for conta in contas
-    ]
-
-    partes_validas = [parte for parte in partes if not parte.empty]
-
-    if not partes_validas:
-        return pd.DataFrame()
-
-    return pd.concat(partes_validas, ignore_index=True)
+    return transformar_pedidos(pedidos)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def carregar_historico_completo(
-    conta: str,
     data_final_iso: str,
     anos: int,
 ) -> pd.DataFrame:
@@ -617,31 +526,12 @@ def carregar_historico_completo(
 
         partes.append(
             carregar_dataframe(
-                conta,
                 cursor.isoformat(),
                 fim_janela.isoformat(),
             )
         )
 
         cursor = fim_janela + timedelta(days=1)
-
-    partes_validas = [parte for parte in partes if not parte.empty]
-
-    if not partes_validas:
-        return pd.DataFrame()
-
-    return pd.concat(partes_validas, ignore_index=True)
-
-
-def carregar_historico_completo_multi(
-    contas: list[str],
-    data_final_iso: str,
-    anos: int,
-) -> pd.DataFrame:
-    partes = [
-        carregar_historico_completo(conta, data_final_iso, anos)
-        for conta in contas
-    ]
 
     partes_validas = [parte for parte in partes if not parte.empty]
 
@@ -666,7 +556,6 @@ def calcular_historico_diario(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(
             columns=[
                 "dia",
-                "conta",
                 "canal",
                 "pedidos",
                 "cancelados",
@@ -681,7 +570,7 @@ def calcular_historico_diario(df: pd.DataFrame) -> pd.DataFrame:
     dados["cancelado"] = dados["situacao_id"].isin(SITUACOES_CANCELADAS)
 
     agregado = (
-        dados.groupby(["dia", "conta", "canal"], as_index=False)
+        dados.groupby(["dia", "canal"], as_index=False)
         .agg(
             pedidos=("id", "nunique"),
             cancelados=("cancelado", "sum"),
@@ -691,13 +580,13 @@ def calcular_historico_diario(df: pd.DataFrame) -> pd.DataFrame:
 
     faturamento_valido = (
         dados.loc[~dados["cancelado"]]
-        .groupby(["dia", "conta", "canal"], as_index=False)
+        .groupby(["dia", "canal"], as_index=False)
         .agg(faturamento_valido=("total", "sum"))
     )
 
     agregado = agregado.merge(
         faturamento_valido,
-        on=["dia", "conta", "canal"],
+        on=["dia", "canal"],
         how="left",
     )
 
@@ -715,7 +604,6 @@ def salvar_historico_diario(agregado: pd.DataFrame) -> None:
     registros = [
         {
             "data": linha["dia"].isoformat(),
-            "conta": linha["conta"],
             "canal": linha["canal"],
             "pedidos": int(linha["pedidos"]),
             "cancelados": int(linha["cancelados"]),
@@ -728,28 +616,23 @@ def salvar_historico_diario(agregado: pd.DataFrame) -> None:
 
     supabase.table("historico_diario").upsert(
         registros,
-        on_conflict="data,canal,conta",
+        on_conflict="data,canal",
     ).execute()
 
 
 def ler_historico_diario(
     data_inicial: date | None = None,
-    conta: str | None = None,
 ) -> pd.DataFrame:
     consulta = supabase.table("historico_diario").select("*")
 
     if data_inicial is not None:
         consulta = consulta.gte("data", data_inicial.isoformat())
 
-    if conta is not None:
-        consulta = consulta.eq("conta", conta)
-
     resposta = consulta.execute()
     dados = resposta.data or []
 
     colunas = [
         "data",
-        "conta",
         "canal",
         "pedidos",
         "cancelados",
@@ -770,12 +653,12 @@ def ler_historico_diario(
 # ITENS DOS PEDIDOS (produto)
 # =========================================================
 
-def buscar_detalhe_pedido(conta: str, pedido_id: int) -> dict[str, Any]:
-    resposta = consultar_bling(conta, f"/pedidos/vendas/{pedido_id}")
+def buscar_detalhe_pedido(pedido_id: int) -> dict[str, Any]:
+    resposta = consultar_bling(f"/pedidos/vendas/{pedido_id}")
     return resposta.get("data", {})
 
 
-def pedidos_ja_sincronizados(conta: str, pedido_ids: list[int]) -> set[int]:
+def pedidos_ja_sincronizados(pedido_ids: list[int]) -> set[int]:
     sincronizados: set[int] = set()
 
     for lote in range(0, len(pedido_ids), 500):
@@ -784,7 +667,6 @@ def pedidos_ja_sincronizados(conta: str, pedido_ids: list[int]) -> set[int]:
         resposta = (
             supabase.table("pedidos_sincronizados")
             .select("pedido_id")
-            .eq("conta", conta)
             .in_("pedido_id", pedaco)
             .execute()
         )
@@ -798,7 +680,6 @@ def pedidos_ja_sincronizados(conta: str, pedido_ids: list[int]) -> set[int]:
 
 def sincronizar_itens_pedidos(
     df: pd.DataFrame,
-    conta: str,
     limite_pedidos: int | None = None,
     progresso: Any = None,
     pausa_segundos: float = 0.4,
@@ -814,7 +695,7 @@ def sincronizar_itens_pedidos(
 
     pendentes = sorted(
         set(pedidos_unicos.index)
-        - pedidos_ja_sincronizados(conta, list(pedidos_unicos.index))
+        - pedidos_ja_sincronizados(list(pedidos_unicos.index))
     )
 
     if limite_pedidos is not None:
@@ -825,12 +706,11 @@ def sincronizar_itens_pedidos(
     for indice, pedido_id in enumerate(pendentes):
         contexto = pedidos_unicos.loc[pedido_id]
 
-        detalhe = buscar_detalhe_pedido(conta, pedido_id)
+        detalhe = buscar_detalhe_pedido(pedido_id)
         itens = detalhe.get("itens") or []
 
         registros_item = [
             {
-                "conta": conta,
                 "pedido_id": int(pedido_id),
                 "item_id": item.get("id"),
                 "produto_id": (item.get("produto") or {}).get("id"),
@@ -855,16 +735,15 @@ def sincronizar_itens_pedidos(
         if registros_item:
             supabase.table("itens_pedidos").upsert(
                 registros_item,
-                on_conflict="conta,pedido_id,item_id",
+                on_conflict="pedido_id,item_id",
             ).execute()
 
         supabase.table("pedidos_sincronizados").upsert(
             {
-                "conta": conta,
                 "pedido_id": int(pedido_id),
                 "sincronizado_em": datetime.now(timezone.utc).isoformat(),
             },
-            on_conflict="conta,pedido_id",
+            on_conflict="pedido_id",
         ).execute()
 
         if progresso is not None:
@@ -875,58 +754,23 @@ def sincronizar_itens_pedidos(
     return total_pendentes
 
 
-def sincronizar_itens_pedidos_multi(
-    df: pd.DataFrame,
-    limite_pedidos: int | None = None,
-    progresso: Any = None,
-    pausa_segundos: float = 0.4,
-) -> int:
-    if df.empty or "conta" not in df.columns:
-        return 0
-
-    total_sincronizados = 0
-
-    for conta, grupo in df.groupby("conta"):
-        # Pedidos manuais (conta "manual") não existem no Bling — não têm
-        # detalhe de itens pra buscar e não têm client_id/secret configurado,
-        # então tentar sincronizá-los quebraria com KeyError/RuntimeError.
-        if conta not in CONTAS_BLING:
-            continue
-
-        total_sincronizados += sincronizar_itens_pedidos(
-            grupo,
-            conta,
-            limite_pedidos=limite_pedidos,
-            progresso=progresso,
-            pausa_segundos=pausa_segundos,
-        )
-
-    return total_sincronizados
-
-
 @st.cache_data(ttl=300, show_spinner=False)
 def ler_itens_pedidos(
     data_inicial: date,
     data_final: date,
-    conta: str | None = None,
 ) -> pd.DataFrame:
-    consulta = (
+    resposta = (
         supabase.table("itens_pedidos")
         .select("*")
         .gte("data", data_inicial.isoformat())
         .lte("data", data_final.isoformat())
+        .execute()
     )
-
-    if conta is not None:
-        consulta = consulta.eq("conta", conta)
-
-    resposta = consulta.execute()
 
     dados = resposta.data or []
 
     colunas = [
         "pedido_id",
-        "conta",
         "produto_id",
         "sku",
         "descricao",
@@ -957,7 +801,6 @@ def ler_metas() -> pd.DataFrame:
 
     colunas = [
         "id",
-        "conta",
         "canal",
         "referencia_inicio",
         "referencia_fim",
@@ -979,7 +822,6 @@ def ler_metas() -> pd.DataFrame:
 
 
 def salvar_meta(
-    conta: str,
     canal: str,
     referencia_inicio: date,
     referencia_fim: date,
@@ -987,7 +829,6 @@ def salvar_meta(
     rotulo: str = "",
 ) -> None:
     registro = {
-        "conta": conta,
         "canal": canal,
         "referencia_inicio": referencia_inicio.isoformat(),
         "referencia_fim": referencia_fim.isoformat(),
@@ -1000,7 +841,7 @@ def salvar_meta(
         supabase.table("metas")
         .upsert(
             registro,
-            on_conflict="conta,canal,referencia_inicio,referencia_fim",
+            on_conflict="canal,referencia_inicio,referencia_fim",
         )
         .execute()
     )
@@ -1010,13 +851,8 @@ def excluir_meta(meta_id: int) -> None:
     supabase.table("metas").delete().eq("id", meta_id).execute()
 
 
-def excluir_todas_metas() -> None:
-    supabase.table("metas").delete().gte("id", 0).execute()
-
-
 def calcular_realizado_meta(
     historico: pd.DataFrame,
-    conta: str,
     canal: str,
     referencia_inicio: date,
     referencia_fim: date,
@@ -1024,15 +860,13 @@ def calcular_realizado_meta(
     if historico.empty:
         return 0.0
 
+    lojas = canais_do_grupo(canal)
+
     filtro = (
-        (historico["conta"] == conta)
+        historico["canal"].isin(lojas)
         & (historico["data"] >= referencia_inicio)
         & (historico["data"] <= referencia_fim)
     )
-
-    if canal != CANAL_CONTA_INTEIRA:
-        lojas = canais_do_grupo(conta, canal)
-        filtro = filtro & historico["canal"].isin(lojas)
 
     return float(historico.loc[filtro, "faturamento_valido"].sum())
 
@@ -1044,7 +878,6 @@ def montar_comparativo(
 ) -> pd.DataFrame:
     colunas = [
         "id",
-        "conta",
         "canal",
         "rotulo",
         "referencia_inicio",
@@ -1066,14 +899,12 @@ def montar_comparativo(
     linhas = []
 
     for _, linha_meta in metas.iterrows():
-        conta_meta = linha_meta["conta"]
         referencia_inicio = linha_meta["referencia_inicio"]
         referencia_fim = linha_meta["referencia_fim"]
         valor_meta = float(linha_meta["valor"])
 
         realizado = calcular_realizado_meta(
             historico,
-            conta_meta,
             linha_meta["canal"],
             referencia_inicio,
             referencia_fim,
@@ -1132,7 +963,6 @@ def montar_comparativo(
         linhas.append(
             {
                 "id": linha_meta["id"],
-                "conta": conta_meta,
                 "canal": linha_meta["canal"],
                 "rotulo": linha_meta.get("rotulo") or "",
                 "referencia_inicio": referencia_inicio,
@@ -1152,160 +982,6 @@ def montar_comparativo(
         )
 
     return pd.DataFrame(linhas, columns=colunas).sort_values(
-        ["referencia_inicio", "conta", "canal"],
-        ascending=[True, True, True],
+        ["referencia_inicio", "canal"],
+        ascending=[True, True],
     )
-
-
-# =========================================================
-# PEDIDOS B2B MANUAIS (não integrados automaticamente com o Bling)
-# =========================================================
-
-# Mesmos IDs de situação já usados para os pedidos do Bling (linha 34-41
-# acima), reaproveitados aqui para que um pedido manual cancelado seja
-# automaticamente excluído do faturamento válido em toda a lógica existente
-# (SITUACOES_CANCELADAS, cartões de KPI, gráficos etc.) sem precisar
-# duplicar essa regra.
-SITUACAO_ID_MANUAL_ATENDIDO = 9
-SITUACAO_ID_MANUAL_CANCELADO = 12
-
-SITUACAO_ID_MANUAL = {
-    "Atendido": SITUACAO_ID_MANUAL_ATENDIDO,
-    "Cancelado": SITUACAO_ID_MANUAL_CANCELADO,
-}
-
-COLUNAS_PEDIDOS_MANUAIS = [
-    "id",
-    "data",
-    "cliente",
-    "canal",
-    "situacao",
-    "total",
-    "observacoes",
-]
-
-
-def salvar_pedido_manual(
-    data_pedido: date,
-    cliente: str,
-    canal: str,
-    total: float,
-    situacao: str = "Atendido",
-    observacoes: str = "",
-) -> None:
-    registro = {
-        "data": data_pedido.isoformat(),
-        "cliente": cliente,
-        "canal": canal,
-        "situacao": situacao,
-        "total": total,
-        "observacoes": observacoes or None,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-    supabase.table("pedidos_manuais").insert(registro).execute()
-
-
-def excluir_pedido_manual(pedido_id: int) -> None:
-    supabase.table("pedidos_manuais").delete().eq("id", pedido_id).execute()
-
-
-def ler_pedidos_manuais_bruto(
-    data_inicial: date | None = None,
-    data_final: date | None = None,
-) -> pd.DataFrame:
-    consulta = supabase.table("pedidos_manuais").select("*")
-
-    if data_inicial is not None:
-        consulta = consulta.gte("data", data_inicial.isoformat())
-
-    if data_final is not None:
-        consulta = consulta.lte("data", data_final.isoformat())
-
-    resposta = consulta.order("data", desc=True).execute()
-    dados = resposta.data or []
-
-    if not dados:
-        return pd.DataFrame(columns=COLUNAS_PEDIDOS_MANUAIS)
-
-    pedidos = pd.DataFrame(dados)
-    pedidos["data"] = pd.to_datetime(pedidos["data"]).dt.date
-    pedidos["observacoes"] = pedidos["observacoes"].fillna("")
-
-    return pedidos[COLUNAS_PEDIDOS_MANUAIS]
-
-
-def transformar_pedidos_manuais(pedidos_manuais: pd.DataFrame) -> pd.DataFrame:
-    colunas = [
-        "id",
-        "conta",
-        "numero",
-        "data",
-        "cliente_id",
-        "cliente",
-        "situacao_id",
-        "situacao",
-        "loja_id",
-        "total_produtos",
-        "total",
-    ]
-
-    if pedidos_manuais.empty:
-        return pd.DataFrame(columns=colunas)
-
-    total = pd.to_numeric(pedidos_manuais["total"], errors="coerce").fillna(0)
-
-    dataframe = pd.DataFrame(
-        {
-            # Negativo pra nunca colidir com um pedido_id real do Bling (que
-            # é sempre positivo) quando os dois forem concatenados.
-            "id": -pedidos_manuais["id"].astype(int),
-            "conta": CONTA_MANUAL,
-            "numero": "B2B-" + pedidos_manuais["id"].astype(str),
-            "data": pd.to_datetime(pedidos_manuais["data"]),
-            "cliente_id": None,
-            "cliente": pedidos_manuais["cliente"],
-            "situacao_id": pedidos_manuais["situacao"].map(SITUACAO_ID_MANUAL),
-            "situacao": pedidos_manuais["situacao"],
-            "loja_id": pedidos_manuais["canal"],
-            "total_produtos": total,
-            "total": total,
-        }
-    )
-
-    return dataframe[colunas]
-
-
-@st.cache_data(ttl=60, show_spinner=False)
-def carregar_pedidos_manuais(
-    data_inicial_iso: str,
-    data_final_iso: str,
-) -> pd.DataFrame:
-    pedidos_manuais = ler_pedidos_manuais_bruto(
-        date.fromisoformat(data_inicial_iso),
-        date.fromisoformat(data_final_iso),
-    )
-
-    return transformar_pedidos_manuais(pedidos_manuais)
-
-
-# Ponto único que soma pedidos manuais aos do Bling — trocar
-# carregar_dataframe_multi por esta função é o que faz os pedidos B2B
-# manuais aparecerem automaticamente em todo o dashboard, sem precisar
-# tocar em cada gráfico/KPI individualmente.
-def carregar_dados_completos_multi(
-    contas: list[str],
-    data_inicial_iso: str,
-    data_final_iso: str,
-) -> pd.DataFrame:
-    partes = [
-        carregar_dataframe_multi(contas, data_inicial_iso, data_final_iso),
-        carregar_pedidos_manuais(data_inicial_iso, data_final_iso),
-    ]
-
-    partes_validas = [parte for parte in partes if not parte.empty]
-
-    if not partes_validas:
-        return pd.DataFrame()
-
-    return pd.concat(partes_validas, ignore_index=True)

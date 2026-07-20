@@ -6,19 +6,17 @@ import plotly.express as px
 import streamlit as st
 
 from bling_core import (
-    CONTAS_BLING,
-    NOMES_CONTA,
     SITUACOES_CANCELADAS,
-    carregar_dados_completos_multi,
-    contas_conectadas,
+    carregar_dataframe,
     gerar_url_autorizacao,
     hoje_sao_paulo,
     ler_historico_diario,
     ler_itens_pedidos,
     ler_metas,
+    ler_tokens,
     moeda_br,
     montar_comparativo,
-    sincronizar_itens_pedidos_multi,
+    sincronizar_itens_pedidos,
 )
 from ui import (
     ALTURA_GRAFICO_PRINCIPAL,
@@ -46,17 +44,14 @@ cabecalho_dashboard(
     "hora.",
 )
 
-contas_ativas = contas_conectadas()
+if not ler_tokens():
+    st.warning("O dashboard ainda não está conectado ao Bling.")
 
-if not contas_ativas:
-    st.warning("O dashboard ainda não está conectado a nenhuma conta Bling.")
-
-    for conta in CONTAS_BLING:
-        st.link_button(
-            f"Conectar {NOMES_CONTA[conta]}",
-            gerar_url_autorizacao(conta),
-            type="primary",
-        )
+    st.link_button(
+        "Conectar ao Bling",
+        gerar_url_autorizacao(),
+        type="primary",
+    )
 
     st.stop()
 
@@ -72,15 +67,12 @@ def exibir_tempo_real() -> None:
         [
             f"🔄 Atualizado em "
             f"{datetime.now().strftime('%d/%m/%Y às %H:%M')}",
-            "🟢 "
-            + ", ".join(NOMES_CONTA[conta] for conta in contas_ativas)
-            + " conectado(s)",
+            "🟢 Bling conectado",
         ]
     )
 
     with st.spinner("Consultando os dados do Bling..."):
-        df = carregar_dados_completos_multi(
-            contas_ativas,
+        df = carregar_dataframe(
             inicio_historico.isoformat(),
             hoje.isoformat(),
         )
@@ -110,7 +102,7 @@ def exibir_tempo_real() -> None:
     # Sincroniza só os pedidos de hoje (poucos, então é rápido e não
     # disputa a cota de requisições do Bling com outras telas).
     pedidos_hoje_df = df.loc[df["data"].dt.date == hoje]
-    sincronizar_itens_pedidos_multi(pedidos_hoje_df, pausa_segundos=0.6)
+    sincronizar_itens_pedidos(pedidos_hoje_df, pausa_segundos=0.6)
 
     itens_hoje = ler_itens_pedidos(hoje, hoje)
 
