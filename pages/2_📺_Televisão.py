@@ -930,7 +930,19 @@ def renderizar_tv() -> None:
         st.stop()
 
     with st.spinner("Atualizando dados da televisão..."):
-        df = carregar_dataframe(inicio_busca.isoformat(), hoje.isoformat())
+        try:
+            df = carregar_dataframe(inicio_busca.isoformat(), hoje.isoformat())
+        except RuntimeError:
+            st.error(
+                "A conexão com o Bling expirou e não foi possível renová-la "
+                "automaticamente."
+            )
+            st.link_button(
+                "Reconectar ao Bling",
+                gerar_url_autorizacao(),
+                type="primary",
+            )
+            st.stop()
 
     if df.empty:
         st.info("Nenhum pedido encontrado para exibir na televisão.")
